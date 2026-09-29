@@ -16,7 +16,7 @@ st.write(
 
 # Fetch Credentials directly from Streamlit Secrets or defaults
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "onru ktez ivct utnp")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
