@@ -4,22 +4,19 @@ import re
 import pandas as pd
 import streamlit as st
 
+# Config & Page Setup
 st.set_page_config(
     page_title="CLdN Manifest Reconciliation", page_icon="🚢", layout="centered"
 )
 
 st.title("🚢 CLdN Manifest Reconciliation")
 st.write(
-    "Upload your Qargo export file below to reconcile it with the latest CLdN sailing email."
+    "Upload your Qargo export file (.csv or .xlsx) below to reconcile against the latest CLdN sailing email."
 )
 
-# Sidebar Credentials (or hardcode/store in Streamlit Secrets)
-GMAIL_USER = st.sidebar.text_input(
-    "Gmail Address", value="lee.byrne@gogginstransport.ie"
-)
-GMAIL_APP_PASS = st.sidebar.text_input(
-    "App Password", type="password", value=""
-)
+# Fetch Credentials directly without displaying sidebar input boxes
+GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "your-16-char-app-password")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
