@@ -16,7 +16,7 @@ st.write(
 
 # Fetch Credentials directly without displaying sidebar input boxes
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "your-16-char-app-password")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "onru ktez ivct utnp")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
