@@ -89,7 +89,17 @@ if uploaded_file and GMAIL_APP_PASS:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
                 qargo_units = set()
+# --- ADD THIS DEBUG BLOCK RIGHT BEFORE CATEGORIZING UNITS ---
+st.divider()
+st.subheader("🔍 Diagnostics & Debug Info")
 
+# Show which email subject was fetched
+st.write(f"**Extracted {len(cldn_units)} units from CLdN Email:**")
+st.code(sorted(list(cldn_units)))
+
+# Show what Qargo extracted
+st.write(f"**Extracted {len(qargo_units)} units from Qargo Upload:**")
+st.code(sorted(list(qargo_units)))
             # 3. Categorize
             all_trailers = sorted(list(qargo_units.union(cldn_units)))
 
