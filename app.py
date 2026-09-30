@@ -1,5 +1,6 @@
 import email
 import email.utils
+import html
 import imaplib
 import re
 import socket
@@ -82,6 +83,7 @@ def fetch_sailing_emails_fast():
 
 
 def fetch_email_body_fast(email_id):
+    """Fetches HTML body specifically to preserve email table structures."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
@@ -91,20 +93,29 @@ def fetch_email_body_fast(email_id):
         raw_email = data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        body = ""
+        html_body = ""
+        plain_body = ""
+
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() in ["text/html", "text/plain"]:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body += payload.decode(errors="ignore") + "\n"
+                ctype = part.get_content_type()
+                payload = part.get_payload(decode=True)
+                if payload:
+                    if ctype == "text/html":
+                        html_body += payload.decode(errors="ignore") + "\n"
+                    elif ctype == "text/plain":
+                        plain_body += payload.decode(errors="ignore") + "\n"
         else:
             payload = msg.get_payload(decode=True)
             if payload:
-                body = payload.decode(errors="ignore")
+                if msg.get_content_type() == "text/html":
+                    html_body = payload.decode(errors="ignore")
+                else:
+                    plain_body = payload.decode(errors="ignore")
 
         mail.logout()
-        return body
+        # Prefer HTML body over plain text so tables parse properly
+        return html_body if html_body.strip() else plain_body
     except Exception as e:
         st.error(f"❌ Error fetching email content: {e}")
         return ""
@@ -122,7 +133,9 @@ def find_column(df, search_terms):
 def clean_val(val):
     if not val or pd.isna(val) or str(val).lower() == "nan":
         return ""
-    return re.sub(r"[^\w]", "", str(val)).upper()
+    # Unescape HTML entities and replace non-breaking spaces (\xa0)
+    text = html.unescape(str(val)).replace("\xa0", " ")
+    return re.sub(r"[^\w]", "", text).upper()
 
 
 # 1. File Upload Section
@@ -223,28 +236,44 @@ if uploaded_file and (selected_email_id or pasted_email_content):
 
                 # Parse HTML structure with BeautifulSoup
                 soup = BeautifulSoup(email_body, "html.parser")
-                
-                # Extract structured table rows
+
                 cldn_units = set()
-                trailer_row_data = {}  # Map: CLEAN_TRAILER -> Set of clean cell values in that row
+                trailer_row_data = {}  # CLEAN_TRAILER -> Set of clean row tokens
 
                 rows = soup.find_all("tr")
                 for tr in rows:
                     cells = tr.find_all(["td", "th"])
                     if not cells:
                         continue
-                    
-                    cell_values = [clean_val(c.get_text()) for c in cells if clean_val(c.get_text())]
-                    row_combined = " ".join(cell_values)
-                    
-                    # Extract any trailer ID in this row
+
+                    # Extract each cell text and also a combined string for the whole row
+                    raw_cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
+                    cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
+                    row_combined = " ".join(cleaned_tokens)
+
+                    # Match GTC Trailer IDs in row
                     gtc_matches = re.findall(r"GTC[\s-]?\d+", row_combined, re.IGNORECASE)
                     for m in gtc_matches:
                         clean_gtc = clean_val(m)
                         cldn_units.add(clean_gtc)
-                        trailer_row_data[clean_gtc] = set(cell_values)
 
-                # Plaintext fallback for whole email search
+                        if clean_gtc not in trailer_row_data:
+                            trailer_row_data[clean_gtc] = set()
+                        
+                        trailer_row_data[clean_gtc].update(cleaned_tokens)
+
+                # Fallback for non-HTML plain text emails
+                if not cldn_units:
+                    for line in email_body.splitlines():
+                        c_line = clean_val(line)
+                        matches = re.findall(r"GTC[\s-]?\d+", c_line, re.IGNORECASE)
+                        for m in matches:
+                            clean_gtc = clean_val(m)
+                            cldn_units.add(clean_gtc)
+                            if clean_gtc not in trailer_row_data:
+                                trailer_row_data[clean_gtc] = set()
+                            trailer_row_data[clean_gtc].add(c_line)
+
                 full_email_clean = clean_val(soup.get_text())
 
                 st.subheader("📋 Reconciliation Results")
@@ -319,15 +348,15 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         instr_status = "Clean 🟢"
 
                     # 3. Reference Row Validator
-                    row_cells = trailer_row_data.get(clean_trailer, set())
+                    row_tokens = trailer_row_data.get(clean_trailer, set())
 
                     def verify_ref(ref_val):
                         c_ref = clean_val(ref_val)
                         if not c_ref:
                             return "-"
 
-                        # Check if reference code exists directly in this trailer's row cells
-                        if any(c_ref in cell or cell in c_ref for cell in row_cells):
+                        # Exact or substring match within the row tokens for that trailer
+                        if any(c_ref in tok or tok in c_ref for tok in row_tokens):
                             return f"{ref_val} 🟢 Matched"
                         elif c_ref in full_email_clean:
                             return f"{ref_val} ⚠️ Mismatch"
