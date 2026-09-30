@@ -7,17 +7,17 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="CLdN Manifest Reconciliation", page_icon="🚢", layout="centered"
+    page_title="CLdN Manifest Reconciliation", page_icon="🚢", layout="wide"
 )
 
 st.title("🚢 CLdN Manifest Reconciliation")
 st.write(
-    "Upload your Qargo export file (.csv or .xlsx) below to reconcile against a CLdN sailing email."
+    "Upload your Qargo export file (.csv or .xlsx) to reconcile trailers, instructions, GMR, PBN, and Booking Refs against CLdN sailing emails."
 )
 
 # Fetch Credentials from Secrets or defaults
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "xqlu xnex rfik sgzd")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
@@ -52,7 +52,6 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
         if not mail_ids:
             return {}
 
-        # Grab the last N emails and reverse them (newest first)
         recent_ids = mail_ids[-limit:]
         recent_ids.reverse()
 
@@ -63,9 +62,7 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
             
-            # Convert UTC date to GMT/IST
             formatted_date = format_to_gmt(raw_date)
-            
             label_text = f"{subject} — ({formatted_date})"
             email_options[label_text] = eid
 
@@ -77,7 +74,7 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
 
 
 def fetch_email_body_by_id(user, app_pass, label, email_id):
-    """Fetches the full body text for a selected email ID."""
+    """Fetches full body text for a selected email ID."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user, app_pass)
@@ -104,6 +101,16 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
     except Exception as e:
         st.error(f"❌ Error fetching email body: {e}")
         return ""
+
+
+def find_column(df, search_terms):
+    """Finds a column name in dataframe matching any of the search terms (case-insensitive)."""
+    for col in df.columns:
+        col_clean = str(col).strip().lower()
+        for term in search_terms:
+            if term.lower() in col_clean:
+                return col
+    return None
 
 
 # 1. Email Dropdown Selector
@@ -137,12 +144,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL, selected_email_id
             )
 
-            # Extract units from email
-            cldn_raw = re.findall(r"GTC[\s-]?\d+", email_body, re.IGNORECASE)
-            cldn_units = set(re.sub(r"[\s-]", "", t).upper() for t in cldn_raw)
-
-            # Extract units from Qargo file
-            qargo_units = set()
+            # Read Qargo File into DataFrame
             try:
                 if uploaded_file.name.endswith((".xlsx", ".xls")):
                     df = pd.read_excel(uploaded_file)
@@ -153,38 +155,107 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         uploaded_file.seek(0)
                         df = pd.read_csv(uploaded_file, encoding_errors="ignore")
 
-                content = df.to_string()
-                qargo_raw = re.findall(r"GTC[\s-]?\d+", content, re.IGNORECASE)
-                qargo_units = set(re.sub(r"[\s-]", "", t).upper() for t in qargo_raw)
+                # Clean column headers
+                df.columns = [str(c).strip() for c in df.columns]
+
             except Exception as e:
-                st.error(f"❌ Error processing uploaded file: {e}")
+                st.error(f"❌ Error reading uploaded file: {e}")
+                df = pd.DataFrame()
 
-            # Display Results
-            all_trailers = sorted(list(qargo_units.union(cldn_units)))
+            if not df.empty:
+                # Dynamically locate columns in the Qargo file
+                trailer_col = find_column(df, ["trailers & instructions", "trailer"])
+                instr_col = find_column(df, ["instructions", "instruction", "notes"])
+                gmr_col = find_column(df, ["gmr"])
+                pbn_col = find_column(df, ["pbn"])
+                booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-            st.divider()
-            st.subheader("📋 Itemized Trailer Breakdown")
+                # Extract units directly from CLdN Email
+                cldn_raw = re.findall(r"GTC[\s-]?\d+", email_body, re.IGNORECASE)
+                cldn_units = set(re.sub(r"[\s-]", "", t).upper() for t in cldn_raw)
 
-            matched_count = 0
-            missing_count = 0
-            forward_count = 0
+                st.divider()
+                st.subheader("📋 Reconciliation Results")
 
-            for trailer in all_trailers:
-                in_qargo = trailer in qargo_units
-                in_cldn = trailer in cldn_units
+                results_data = []
 
-                if in_qargo and in_cldn:
-                    st.success(f"• **{trailer}** — Matched")
-                    matched_count += 1
-                elif in_qargo and not in_cldn:
-                    st.error(f"• **{trailer}** — Not Present (Left Behind)")
-                    missing_count += 1
-                elif not in_qargo and in_cldn:
-                    st.info(f"• **{trailer}** — Forward Shipped")
-                    forward_count += 1
+                for idx, row in df.iterrows():
+                    # Parse Trailer ID
+                    raw_trailer = str(row[trailer_col]) if trailer_col and pd.notna(row[trailer_col]) else ""
+                    trailer_match = re.search(r"GTC[\s-]?\d+", raw_trailer, re.IGNORECASE)
+                    clean_trailer = re.sub(r"[\s-]", "", trailer_match.group(0)).upper() if trailer_match else raw_trailer.strip()
 
-            st.divider()
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Matched", matched_count)
-            col2.metric("Not Present", missing_count)
-            col3.metric("Forward Shipped", forward_count)
+                    if not clean_trailer or clean_trailer.lower() == "nan":
+                        continue
+
+                    # 1. Check Trailer Status against Email
+                    in_email = clean_trailer in cldn_units
+                    status = "Matched 🟢" if in_email else "Not Present (Left Behind) 🔴"
+
+                    # 2. Check Instructions Column
+                    raw_instr = str(row[instr_col]).strip() if instr_col and pd.notna(row[instr_col]) else ""
+                    has_instructions = bool(raw_instr and raw_instr.lower() != "nan")
+                    instr_status = f"⚠️ Flagged: {raw_instr}" if has_instructions else "Clean (Blank) 🟢"
+
+                    # 3. Cross-reference GMR
+                    raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
+                    gmr_status = "-"
+                    if raw_gmr and raw_gmr.lower() != "nan":
+                        gmr_in_email = raw_gmr.lower() in email_body.lower()
+                        gmr_status = f"{raw_gmr} " + ("🟢 Found" if gmr_in_email else "🔴 Missing in Email")
+
+                    # 4. Cross-reference PBN
+                    raw_pbn = str(row[pbn_col]).strip() if pbn_col and pd.notna(row[pbn_col]) else ""
+                    pbn_status = "-"
+                    if raw_pbn and raw_pbn.lower() != "nan":
+                        pbn_in_email = raw_pbn.lower() in email_body.lower()
+                        pbn_status = f"{raw_pbn} " + ("🟢 Found" if pbn_in_email else "🔴 Missing in Email")
+
+                    # 5. Cross-reference Booking Ref
+                    raw_booking = str(row[booking_col]).strip() if booking_col and pd.notna(row[booking_col]) else ""
+                    booking_status = "-"
+                    if raw_booking and raw_booking.lower() != "nan":
+                        booking_in_email = raw_booking.lower() in email_body.lower()
+                        booking_status = f"{raw_booking} " + ("🟢 Found" if booking_in_email else "🔴 Missing in Email")
+
+                    results_data.append({
+                        "Trailer ID": clean_trailer,
+                        "Sailing Status": status,
+                        "Instructions Check": instr_status,
+                        "GMR Ref": gmr_status,
+                        "PBN Ref": pbn_status,
+                        "Booking Ref": booking_status
+                    })
+
+                # Check for Forward Shipped units (Present in CLdN email but missing from Qargo file)
+                qargo_found_units = set(r["Trailer ID"] for r in results_data)
+                forward_shipped = cldn_units - qargo_found_units
+                
+                for f_unit in sorted(list(forward_shipped)):
+                    results_data.append({
+                        "Trailer ID": f_unit,
+                        "Sailing Status": "Forward Shipped 🔵",
+                        "Instructions Check": "-",
+                        "GMR Ref": "-",
+                        "PBN Ref": "-",
+                        "Booking Ref": "-"
+                    })
+
+                # Output Results as an Interactive Table
+                results_df = pd.DataFrame(results_data)
+                st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+                # Totals Summary
+                st.divider()
+                st.subheader("📊 Summary Metrics")
+                c1, c2, c3, c4 = st.columns(4)
+                
+                matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
+                left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
+                forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
+                flagged_cnt = sum(1 for r in results_data if "Flagged" in r["Instructions Check"])
+
+                c1.metric("Matched Trailers", matched_cnt)
+                c2.metric("Left Behind", left_cnt)
+                c3.metric("Forward Shipped", forward_cnt)
+                c4.metric("Flagged Instructions", flagged_cnt)
