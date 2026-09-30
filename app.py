@@ -1,6 +1,8 @@
 import email
+import email.utils
 import imaplib
 import re
+import zoneinfo
 import pandas as pd
 import streamlit as st
 
@@ -13,14 +15,27 @@ st.write(
     "Upload your Qargo export file (.csv or .xlsx) below to reconcile against a CLdN sailing email."
 )
 
-# Fetch Credentials
+# Fetch Credentials from Secrets or defaults
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "onru ktez ivct utnp")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
+def format_to_gmt(raw_date_str):
+    """Converts raw email date headers (UTC) to formatted local GMT/IST time."""
+    if not raw_date_str:
+        return "Unknown Date"
+    try:
+        dt_utc = email.utils.parsedate_to_datetime(raw_date_str)
+        local_tz = zoneinfo.ZoneInfo("Europe/Dublin")
+        dt_local = dt_utc.astimezone(local_tz)
+        return dt_local.strftime("%a, %d %b %Y %H:%M:%S %Z")
+    except Exception:
+        return raw_date_str
+
+
 def get_recent_emails_list(user, app_pass, label, limit=10):
-    """Fetches the subjects and dates of the last N emails in the folder for the dropdown."""
+    """Fetches subjects and GMT dates for the last N emails in the folder."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user, app_pass)
@@ -29,36 +44,40 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
         if status != "OK":
             status, _ = mail.select("INBOX")
             if status != "OK":
-                return [], None
+                return {}
 
         status, data = mail.search(None, "ALL")
         mail_ids = data[0].split()
 
         if not mail_ids:
-            return [], None
+            return {}
 
-        # Take the last N email IDs
+        # Grab the last N emails and reverse them (newest first)
         recent_ids = mail_ids[-limit:]
-        recent_ids.reverse()  # Newest first
+        recent_ids.reverse()
 
         email_options = {}
         for eid in recent_ids:
             status, data = mail.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])")
             msg = email.message_from_bytes(data[0][1])
             subject = msg.get("Subject", "No Subject")
-            date_str = msg.get("Date", "Unknown Date")
-            label_text = f"{subject} — ({date_str})"
+            raw_date = msg.get("Date", "")
+            
+            # Convert UTC date to GMT/IST
+            formatted_date = format_to_gmt(raw_date)
+            
+            label_text = f"{subject} — ({formatted_date})"
             email_options[label_text] = eid
 
         mail.logout()
-        return email_options, mail
+        return email_options
     except Exception as e:
         st.error(f"❌ Error fetching email list: {e}")
-        return {}, None
+        return {}
 
 
 def fetch_email_body_by_id(user, app_pass, label, email_id):
-    """Fetches full body text for a specific chosen email ID."""
+    """Fetches the full body text for a selected email ID."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user, app_pass)
@@ -87,9 +106,10 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
         return ""
 
 
-# 1. Fetch recent email options
+# 1. Email Dropdown Selector
+selected_email_id = None
 if GMAIL_APP_PASS:
-    email_options, _ = get_recent_emails_list(GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL)
+    email_options = get_recent_emails_list(GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL)
 
     if email_options:
         selected_email_label = st.selectbox(
@@ -100,27 +120,28 @@ if GMAIL_APP_PASS:
     else:
         st.warning("⚠️ No emails found in folder or connection failed.")
 else:
-    st.warning("⚠️️ Gmail App Password missing in Streamlit Secrets.")
+    st.warning("⚠️ Gmail App Password missing in Streamlit Secrets.")
 
-# 2. File Uploader
+# 2. File Upload Section
 uploaded_file = st.file_uploader(
     "Drop Qargo File (.csv, .xlsx, or .xls)", type=["csv", "xlsx", "xls"]
 )
 
+# 3. Execution & Results
 if uploaded_file and GMAIL_APP_PASS and selected_email_id:
     if st.button("Run Reconciliation", type="primary", use_container_width=True):
         with st.spinner("Processing reconciliation..."):
 
-            # Fetch selected email body
+            # Fetch selected email
             email_body = fetch_email_body_by_id(
                 GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL, selected_email_id
             )
 
-            # Extract units from selected email
+            # Extract units from email
             cldn_raw = re.findall(r"GTC[\s-]?\d+", email_body, re.IGNORECASE)
             cldn_units = set(re.sub(r"[\s-]", "", t).upper() for t in cldn_raw)
 
-            # Extract units from uploaded file
+            # Extract units from Qargo file
             qargo_units = set()
             try:
                 if uploaded_file.name.endswith((".xlsx", ".xls")):
@@ -136,7 +157,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 qargo_raw = re.findall(r"GTC[\s-]?\d+", content, re.IGNORECASE)
                 qargo_units = set(re.sub(r"[\s-]", "", t).upper() for t in qargo_raw)
             except Exception as e:
-                st.error(f"❌ Error processing file: {e}")
+                st.error(f"❌ Error processing uploaded file: {e}")
 
             # Display Results
             all_trailers = sorted(list(qargo_units.union(cldn_units)))
