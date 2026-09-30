@@ -61,7 +61,7 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
             msg = email.message_from_bytes(data[0][1])
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
-            
+
             formatted_date = format_to_gmt(raw_date)
             label_text = f"{subject} — ({formatted_date})"
             email_options[label_text] = eid
@@ -104,7 +104,7 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
 
 
 def find_column(df, search_terms):
-    """Finds a column name in dataframe matching any of the search terms (case-insensitive)."""
+    """Finds a column name in dataframe matching any search terms (case-insensitive)."""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for term in search_terms:
@@ -155,7 +155,6 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         uploaded_file.seek(0)
                         df = pd.read_csv(uploaded_file, encoding_errors="ignore")
 
-                # Clean column headers
                 df.columns = [str(c).strip() for c in df.columns]
 
             except Exception as e:
@@ -163,7 +162,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 df = pd.DataFrame()
 
             if not df.empty:
-                # Dynamically locate columns in the Qargo file
+                # Locate specific columns dynamically
                 trailer_col = find_column(df, ["trailers & instructions", "trailer"])
                 instr_col = find_column(df, ["instructions", "instruction", "notes"])
                 gmr_col = find_column(df, ["gmr"])
@@ -188,46 +187,26 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     if not clean_trailer or clean_trailer.lower() == "nan":
                         continue
 
-                    # 1. Check Trailer Status against Email
+                    # 1. Sailing Status
                     in_email = clean_trailer in cldn_units
                     status = "Matched 🟢" if in_email else "Not Present (Left Behind) 🔴"
 
-                    # NEW SMART INSTRUCTION LOGIC:
-raw_instr = (
-    str(row[instr_col]).strip()
-    if instr_col and pd.notna(row[instr_col])
-    else ""
-)
+                    # 2. Smart Instructions Check
+                    raw_instr = str(row[instr_col]).strip() if instr_col and pd.notna(row[instr_col]) else ""
+                    instr_trailer_match = re.search(r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE)
+                    instr_trailer_clean = re.sub(r"[\s-]", "", instr_trailer_match.group(0)).upper() if instr_trailer_match else ""
 
-# Extract any trailer ID mentioned inside the instruction text itself
-instr_trailer_match = re.search(r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE)
-instr_trailer_clean = (
-    re.sub(r"[\s-]", "", instr_trailer_match.group(0)).upper()
-    if instr_trailer_match
-    else ""
-)
+                    clean_raw_text = raw_instr if raw_instr.lower() != "nan" else ""
+                    extra_notes = re.sub(r"GTC[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip() if clean_raw_text else ""
 
-# Clean up raw_instr string (remove "nan" or plain repeated trailer)
-clean_raw_text = raw_instr if raw_instr.lower() != "nan" else ""
-
-# Check if instruction has actual extra notes (e.g. "DGN SENT")
-extra_notes = (
-    re.sub(r"GTC[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip()
-    if clean_raw_text
-    else ""
-)
-
-if not clean_raw_text:
-    instr_status = "Clean (Blank) 🟢"
-elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
-    # Mismatch detected (e.g. Row is GTC227 but instruction says GTC226)
-    instr_status = f"⚠️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
-elif extra_notes:
-    # Extra instructions exist (e.g. "GTC345 DGN SENT")
-    instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
-else:
-    # Text was just a plain repeat of its own trailer ID (e.g. "GTC206")
-    instr_status = "Clean 🟢"
+                    if not clean_raw_text:
+                        instr_status = "Clean (Blank) 🟢"
+                    elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
+                        instr_status = f"⚠️️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
+                    elif extra_notes:
+                        instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
+                    else:
+                        instr_status = "Clean 🟢"
 
                     # 3. Cross-reference GMR
                     raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
@@ -259,10 +238,10 @@ else:
                         "Booking Ref": booking_status
                     })
 
-                # Check for Forward Shipped units (Present in CLdN email but missing from Qargo file)
+                # Check for Forward Shipped units
                 qargo_found_units = set(r["Trailer ID"] for r in results_data)
                 forward_shipped = cldn_units - qargo_found_units
-                
+
                 for f_unit in sorted(list(forward_shipped)):
                     results_data.append({
                         "Trailer ID": f_unit,
@@ -277,15 +256,15 @@ else:
                 results_df = pd.DataFrame(results_data)
                 st.dataframe(results_df, use_container_width=True, hide_index=True)
 
-                # Totals Summary
+                # Summary Totals
                 st.divider()
                 st.subheader("📊 Summary Metrics")
                 c1, c2, c3, c4 = st.columns(4)
-                
+
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "Flagged" in r["Instructions Check"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️️" in r["Instructions Check"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
