@@ -251,8 +251,8 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
                     row_combined = " ".join(cleaned_tokens)
 
-                    # Match GTC Trailer IDs in row
-                    gtc_matches = re.findall(r"GTC[\s-]?\d+", row_combined, re.IGNORECASE)
+                    # Updated regex to capture GTUK11 and GTC trailers:
+gtc_matches = re.findall(r"(?:GTC|GTUK)[\s-]?\d+", row_combined, re.IGNORECASE)
                     for m in gtc_matches:
                         clean_gtc = clean_val(m)
                         cldn_units.add(clean_gtc)
@@ -312,8 +312,11 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         if instr_col and pd.notna(row[instr_col])
                         else ""
                     )
-                    instr_trailer_match = re.search(
-                        r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE
+                    trailer_match = re.search(r"(?:GTC|GTUK)[\s-]?\d+", raw_trailer, re.IGNORECASE)
+
+# Clean instructions check:
+instr_trailer_match = re.search(r"(?:GTC|GTUK)[\s-]?\d+", raw_instr, re.IGNORECASE)
+extra_notes = re.sub(r"(?:GTC|GTUK)[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip()
                     )
                     instr_trailer_clean = (
                         clean_val(instr_trailer_match.group(0))
