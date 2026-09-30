@@ -3,6 +3,7 @@ import email.utils
 import imaplib
 import re
 import zoneinfo
+from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
 
@@ -74,7 +75,7 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
 
 
 def fetch_email_body_by_id(user, app_pass, label, email_id):
-    """Fetches full body text for a selected email ID."""
+    """Fetches full body text & HTML for a selected email ID."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user, app_pass)
@@ -87,7 +88,7 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() in ["text/plain", "text/html"]:
+                if part.get_content_type() in ["text/html", "text/plain"]:
                     payload = part.get_payload(decode=True)
                     if payload:
                         body += payload.decode(errors="ignore") + "\n"
@@ -104,7 +105,7 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
 
 
 def find_column(df, search_terms):
-    """Finds a column name in dataframe matching any search terms (case-insensitive)."""
+    """Finds a column name in dataframe matching search terms."""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for term in search_terms:
@@ -139,12 +140,11 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
     if st.button("Run Reconciliation", type="primary", use_container_width=True):
         with st.spinner("Processing reconciliation..."):
 
-            # Fetch selected email
             email_body = fetch_email_body_by_id(
                 GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL, selected_email_id
             )
 
-            # Read Qargo File into DataFrame
+            # Read Qargo File
             try:
                 if uploaded_file.name.endswith((".xlsx", ".xls")):
                     df = pd.read_excel(uploaded_file)
@@ -162,30 +162,39 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 df = pd.DataFrame()
 
             if not df.empty:
-                # Locate specific columns dynamically
                 trailer_col = find_column(df, ["trailers & instructions", "trailer"])
                 instr_col = find_column(df, ["instructions", "instruction", "notes"])
                 gmr_col = find_column(df, ["gmr"])
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # Clean HTML tags into standardized line breaks to handle HTML tables
-                clean_email_text = re.sub(r'<tr[^>]*>', '\n', email_body, flags=re.IGNORECASE)
-                clean_email_text = re.sub(r'<br\s*/?>', '\n', clean_email_text, flags=re.IGNORECASE)
-                clean_email_text = re.sub(r'<[^>]+>', ' ', clean_email_text)
+                # --- HTML TABLE PARSER ---
+                # Use BeautifulSoup to parse HTML table rows (tr) cleanly
+                soup = BeautifulSoup(email_body, "html.parser")
+                rows = soup.find_all("tr")
 
-                # Extract all GTC trailer IDs
-                cldn_raw = re.findall(r"GTC[\s-]?\d+", clean_email_text, re.IGNORECASE)
-                cldn_units = set(re.sub(r"[\s-]", "", t).upper() for t in cldn_raw)
+                trailer_row_text_map = {}
+                cldn_units = set()
 
-                # Map each trailer to its specific HTML row block
-                email_lines = clean_email_text.splitlines()
-                trailer_email_row_map = {}
-                for line in email_lines:
-                    matches = re.findall(r"GTC[\s-]?\d+", line, re.IGNORECASE)
-                    for m in matches:
-                        clean_m = re.sub(r"[\s-]", "", m).upper()
-                        trailer_email_row_map[clean_m] = line.lower()
+                if rows:
+                    for tr in rows:
+                        row_str = tr.get_text(separator=" ", strip=True)
+                        matches = re.findall(r"GTC[\s-]?\d+", row_str, re.IGNORECASE)
+                        for m in matches:
+                            clean_m = re.sub(r"[\s-]", "", m).upper()
+                            cldn_units.add(clean_m)
+                            trailer_row_text_map[clean_m] = row_str.lower()
+
+                # Fallback if email wasn't HTML
+                if not cldn_units:
+                    for line in email_body.splitlines():
+                        matches = re.findall(r"GTC[\s-]?\d+", line, re.IGNORECASE)
+                        for m in matches:
+                            clean_m = re.sub(r"[\s-]", "", m).upper()
+                            cldn_units.add(clean_m)
+                            trailer_row_text_map[clean_m] = line.lower()
+
+                plain_email_lower = soup.get_text().lower()
 
                 st.divider()
                 st.subheader("📋 Reconciliation Results")
@@ -193,7 +202,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 results_data = []
 
                 for idx, row in df.iterrows():
-                    # Parse Trailer ID
+                    # Parse Trailer ID from Qargo
                     raw_trailer = str(row[trailer_col]) if trailer_col and pd.notna(row[trailer_col]) else ""
                     trailer_match = re.search(r"GTC[\s-]?\d+", raw_trailer, re.IGNORECASE)
                     clean_trailer = re.sub(r"[\s-]", "", trailer_match.group(0)).upper() if trailer_match else raw_trailer.strip()
@@ -201,14 +210,11 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     if not clean_trailer or clean_trailer.lower() == "nan":
                         continue
 
-                    # 1. Sailing Status
+                    # 1. Check Trailer Presence on Manifest
                     in_email = clean_trailer in cldn_units
                     status = "Matched 🟢" if in_email else "Not Present (Left Behind) 🔴"
 
-                    # Get specific email row text for this trailer
-                    specific_email_row = trailer_email_row_map.get(clean_trailer, "")
-
-                    # 2. Smart Instructions Check
+                    # 2. Check Qargo Internal Column (Trailers vs Instructions)
                     raw_instr = str(row[instr_col]).strip() if instr_col and pd.notna(row[instr_col]) else ""
                     instr_trailer_match = re.search(r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE)
                     instr_trailer_clean = re.sub(r"[\s-]", "", instr_trailer_match.group(0)).upper() if instr_trailer_match else ""
@@ -225,19 +231,21 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     else:
                         instr_status = "Clean 🟢"
 
-                    # Helper function to evaluate row match vs global match
-                    def verify_reference(ref_val):
+                    # 3. Check Row-Specific Matching against Email Table
+                    row_text_for_trailer = trailer_row_text_map.get(clean_trailer, "")
+
+                    def verify_ref(ref_val):
                         if not ref_val or ref_val.lower() == "nan":
                             return "-"
-                        ref_lower = ref_val.lower()
-                        if specific_email_row and ref_lower in specific_email_row:
-                            return f"{ref_val} 🟢 Matched"
-                        elif ref_lower in clean_email_text.lower():
-                            return f"{ref_val} ⚠️ Swapped (Row Mismatch)"
-                        else:
-                            return f"{ref_val} 🔴 Missing in Email"
+                        ref_lower = ref_val.lower().strip()
 
-                    # 3. Cross-references
+                        if row_text_for_trailer and ref_lower in row_text_for_trailer:
+                            return f"{ref_val} 🟢 Matched"
+                        elif ref_lower in plain_email_lower:
+                            return f"{ref_val} ⚠️ Swapped (Belongs to another row)"
+                        else:
+                            return f"{ref_val} 🔴 Missing on Manifest"
+
                     raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
                     raw_pbn = str(row[pbn_col]).strip() if pbn_col and pd.notna(row[pbn_col]) else ""
                     raw_booking = str(row[booking_col]).strip() if booking_col and pd.notna(row[booking_col]) else ""
@@ -246,12 +254,12 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         "Trailer ID": clean_trailer,
                         "Sailing Status": status,
                         "Instructions Check": instr_status,
-                        "GMR Ref": verify_reference(raw_gmr),
-                        "PBN Ref": verify_reference(raw_pbn),
-                        "Booking Ref": verify_reference(raw_booking)
+                        "GMR Ref": verify_ref(raw_gmr),
+                        "PBN Ref": verify_ref(raw_pbn),
+                        "Booking Ref": verify_ref(raw_booking)
                     })
 
-                # Check for Forward Shipped units
+                # 4. Check Forward Shipped Units
                 qargo_found_units = set(r["Trailer ID"] for r in results_data)
                 forward_shipped = cldn_units - qargo_found_units
 
@@ -265,11 +273,11 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         "Booking Ref": "-"
                     })
 
-                # Output Results as an Interactive Table
+                # Render Results Table
                 results_df = pd.DataFrame(results_data)
                 st.dataframe(results_df, use_container_width=True, hide_index=True)
 
-                # Summary Totals
+                # Metrics Summary
                 st.divider()
                 st.subheader("📊 Summary Metrics")
                 c1, c2, c3, c4 = st.columns(4)
@@ -277,7 +285,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️️" in r["GMR Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
