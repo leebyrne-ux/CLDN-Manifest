@@ -114,6 +114,13 @@ def find_column(df, search_terms):
     return None
 
 
+def clean_val(val):
+    """Strips space and special characters for exact matching."""
+    if not val or pd.isna(val) or str(val).lower() == "nan":
+        return ""
+    return re.sub(r"[^\w]", "", str(val)).upper()
+
+
 # 1. Email Dropdown Selector
 selected_email_id = None
 if GMAIL_APP_PASS:
@@ -168,33 +175,32 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # --- HTML TABLE PARSER ---
-                # Use BeautifulSoup to parse HTML table rows (tr) cleanly
+                # --- HTML TABLE STRUCTURE PARSER ---
                 soup = BeautifulSoup(email_body, "html.parser")
                 rows = soup.find_all("tr")
 
-                trailer_row_text_map = {}
+                # Store extracted structured row data per unit ID
+                cldn_manifest_map = {}
                 cldn_units = set()
 
-                if rows:
-                    for tr in rows:
-                        row_str = tr.get_text(separator=" ", strip=True)
-                        matches = re.findall(r"GTC[\s-]?\d+", row_str, re.IGNORECASE)
-                        for m in matches:
-                            clean_m = re.sub(r"[\s-]", "", m).upper()
-                            cldn_units.add(clean_m)
-                            trailer_row_text_map[clean_m] = row_str.lower()
+                for tr in rows:
+                    cells = [cell.get_text(strip=True) for cell in tr.find_all(["td", "th"])]
+                    row_text = " ".join(cells)
 
-                # Fallback if email wasn't HTML
-                if not cldn_units:
-                    for line in email_body.splitlines():
-                        matches = re.findall(r"GTC[\s-]?\d+", line, re.IGNORECASE)
-                        for m in matches:
-                            clean_m = re.sub(r"[\s-]", "", m).upper()
-                            cldn_units.add(clean_m)
-                            trailer_row_text_map[clean_m] = line.lower()
+                    # Look for GTC trailer in row cells
+                    gtc_match = re.search(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
+                    if gtc_match:
+                        clean_trailer_id = clean_val(gtc_match.group(0))
+                        cldn_units.add(clean_trailer_id)
 
-                plain_email_lower = soup.get_text().lower()
+                        # Store all row cell values cleaned up for reference comparison
+                        cleaned_row_cells = [clean_val(c) for c in cells if c]
+                        cldn_manifest_map[clean_trailer_id] = {
+                            "raw_text": clean_val(row_text),
+                            "cells": cleaned_row_cells
+                        }
+
+                full_email_clean = clean_val(soup.get_text())
 
                 st.divider()
                 st.subheader("📋 Reconciliation Results")
@@ -202,12 +208,12 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 results_data = []
 
                 for idx, row in df.iterrows():
-                    # Parse Trailer ID from Qargo
+                    # Parse Trailer ID
                     raw_trailer = str(row[trailer_col]) if trailer_col and pd.notna(row[trailer_col]) else ""
                     trailer_match = re.search(r"GTC[\s-]?\d+", raw_trailer, re.IGNORECASE)
-                    clean_trailer = re.sub(r"[\s-]", "", trailer_match.group(0)).upper() if trailer_match else raw_trailer.strip()
+                    clean_trailer = clean_val(trailer_match.group(0)) if trailer_match else clean_val(raw_trailer)
 
-                    if not clean_trailer or clean_trailer.lower() == "nan":
+                    if not clean_trailer:
                         continue
 
                     # 1. Check Trailer Presence on Manifest
@@ -217,49 +223,54 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     # 2. Check Qargo Internal Column (Trailers vs Instructions)
                     raw_instr = str(row[instr_col]).strip() if instr_col and pd.notna(row[instr_col]) else ""
                     instr_trailer_match = re.search(r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE)
-                    instr_trailer_clean = re.sub(r"[\s-]", "", instr_trailer_match.group(0)).upper() if instr_trailer_match else ""
+                    instr_trailer_clean = clean_val(instr_trailer_match.group(0)) if instr_trailer_match else ""
 
                     clean_raw_text = raw_instr if raw_instr.lower() != "nan" else ""
                     extra_notes = re.sub(r"GTC[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip() if clean_raw_text else ""
 
                     if not clean_raw_text:
-                        instr_status = "Clean (Blank) 🟢"
+                        instr_status = "Clean 🟢"
                     elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
-                        instr_status = f"⚠️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
+                        instr_status = f"⚠️ Mismatch: {clean_raw_text}"
                     elif extra_notes:
                         instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
                     else:
                         instr_status = "Clean 🟢"
 
-                    # 3. Check Row-Specific Matching against Email Table
-                    row_text_for_trailer = trailer_row_text_map.get(clean_trailer, "")
+                    # 3. Reference Row Validator
+                    trailer_cldn_data = cldn_manifest_map.get(clean_trailer, {})
 
-                    def verify_ref(ref_val):
-                        if not ref_val or ref_val.lower() == "nan":
+                    def check_reference(ref_val):
+                        c_ref = clean_val(ref_val)
+                        if not c_ref:
                             return "-"
-                        ref_lower = ref_val.lower().strip()
 
-                        if row_text_for_trailer and ref_lower in row_text_for_trailer:
-                            return f"{ref_val} 🟢 Matched"
-                        elif ref_lower in plain_email_lower:
-                            return f"{ref_val} ⚠️ Swapped (Belongs to another row)"
-                        else:
-                            return f"{ref_val} 🔴 Missing on Manifest"
+                        # Exact cell match in the same row
+                        if trailer_cldn_data:
+                            row_cells = trailer_cldn_data.get("cells", [])
+                            row_raw = trailer_cldn_data.get("raw_text", "")
 
-                    raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
-                    raw_pbn = str(row[pbn_col]).strip() if pbn_col and pd.notna(row[pbn_col]) else ""
-                    raw_booking = str(row[booking_col]).strip() if booking_col and pd.notna(row[booking_col]) else ""
+                            # Check if reference is in trailer's HTML row
+                            if c_ref in row_cells or c_ref in row_raw:
+                                return f"{ref_val} 🟢 Matched"
+
+                        # If not matched to this trailer's row, flag as Mismatch
+                        return f"{ref_val} ⚠️ Mismatch"
+
+                    raw_gmr = str(row[gmr_col]) if gmr_col and pd.notna(row[gmr_col]) else ""
+                    raw_pbn = str(row[pbn_col]) if pbn_col and pd.notna(row[pbn_col]) else ""
+                    raw_booking = str(row[booking_col]) if booking_col and pd.notna(row[booking_col]) else ""
 
                     results_data.append({
                         "Trailer ID": clean_trailer,
                         "Sailing Status": status,
                         "Instructions Check": instr_status,
-                        "GMR Ref": verify_ref(raw_gmr),
-                        "PBN Ref": verify_ref(raw_pbn),
-                        "Booking Ref": verify_ref(raw_booking)
+                        "GMR Ref": check_reference(raw_gmr),
+                        "PBN Ref": check_reference(raw_pbn),
+                        "Booking Ref": check_reference(raw_booking)
                     })
 
-                # 4. Check Forward Shipped Units
+                # Check Forward Shipped Units
                 qargo_found_units = set(r["Trailer ID"] for r in results_data)
                 forward_shipped = cldn_units - qargo_found_units
 
@@ -273,11 +284,11 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         "Booking Ref": "-"
                     })
 
-                # Render Results Table
+                # Display Results Table
                 results_df = pd.DataFrame(results_data)
                 st.dataframe(results_df, use_container_width=True, hide_index=True)
 
-                # Metrics Summary
+                # Summary Totals
                 st.divider()
                 st.subheader("📊 Summary Metrics")
                 c1, c2, c3, c4 = st.columns(4)
@@ -285,7 +296,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
