@@ -17,7 +17,7 @@ st.write(
 
 # Fetch Credentials from Secrets or defaults
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "bshg mcwd kahp xpqa")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
