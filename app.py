@@ -24,8 +24,8 @@ GMAIL_LABEL = "AA Shipping/CLDN"
 
 socket.setdefaulttimeout(4.0)
 
-# Broad regex pattern matching GTC, GTUK, GTIE, etc.
-TRAILER_REGEX = r"GT[A-Z0-9]{1,4}[\s-]?\d+"
+# Precise pattern for GTC (3 digits) and GTUK (2 digits)
+TRAILER_REGEX = r"\b(?:GTC\d{3}|GTUK\d{2})\b"
 
 
 def format_to_gmt(raw_date_str):
@@ -251,7 +251,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
                     row_combined = " ".join(cleaned_tokens)
 
-                    # Match GT prefix Trailer IDs in row (e.g. GTC147, GTUK11)
+                    # Match strict GTC and GTUK Trailer IDs in row
                     gt_matches = re.findall(TRAILER_REGEX, row_combined, re.IGNORECASE)
                     for m in gt_matches:
                         clean_gt = clean_val(m)
