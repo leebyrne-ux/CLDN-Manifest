@@ -24,6 +24,9 @@ GMAIL_LABEL = "AA Shipping/CLDN"
 
 socket.setdefaulttimeout(4.0)
 
+# Broad regex pattern matching GTC, GTUK, GTIE, etc.
+TRAILER_REGEX = r"GT[A-Z0-9]{1,4}[\s-]?\d+"
+
 
 def format_to_gmt(raw_date_str):
     if not raw_date_str:
@@ -114,7 +117,6 @@ def fetch_email_body_fast(email_id):
                     plain_body = payload.decode(errors="ignore")
 
         mail.logout()
-        # Prefer HTML body over plain text so tables parse properly
         return html_body if html_body.strip() else plain_body
     except Exception as e:
         st.error(f"❌ Error fetching email content: {e}")
@@ -133,7 +135,6 @@ def find_column(df, search_terms):
 def clean_val(val):
     if not val or pd.isna(val) or str(val).lower() == "nan":
         return ""
-    # Unescape HTML entities and replace non-breaking spaces (\xa0)
     text = html.unescape(str(val)).replace("\xa0", " ")
     return re.sub(r"[^\w]", "", text).upper()
 
@@ -246,33 +247,32 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     if not cells:
                         continue
 
-                    # Extract each cell text and also a combined string for the whole row
                     raw_cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
                     cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
                     row_combined = " ".join(cleaned_tokens)
 
-                    # Updated regex to capture GTUK11 and GTC trailers:
-gtc_matches = re.findall(r"(?:GTC|GTUK)[\s-]?\d+", row_combined, re.IGNORECASE)
-                    for m in gtc_matches:
-                        clean_gtc = clean_val(m)
-                        cldn_units.add(clean_gtc)
+                    # Match GT prefix Trailer IDs in row (e.g. GTC147, GTUK11)
+                    gt_matches = re.findall(TRAILER_REGEX, row_combined, re.IGNORECASE)
+                    for m in gt_matches:
+                        clean_gt = clean_val(m)
+                        cldn_units.add(clean_gt)
 
-                        if clean_gtc not in trailer_row_data:
-                            trailer_row_data[clean_gtc] = set()
+                        if clean_gt not in trailer_row_data:
+                            trailer_row_data[clean_gt] = set()
                         
-                        trailer_row_data[clean_gtc].update(cleaned_tokens)
+                        trailer_row_data[clean_gt].update(cleaned_tokens)
 
                 # Fallback for non-HTML plain text emails
                 if not cldn_units:
                     for line in email_body.splitlines():
                         c_line = clean_val(line)
-                        matches = re.findall(r"GTC[\s-]?\d+", c_line, re.IGNORECASE)
+                        matches = re.findall(TRAILER_REGEX, c_line, re.IGNORECASE)
                         for m in matches:
-                            clean_gtc = clean_val(m)
-                            cldn_units.add(clean_gtc)
-                            if clean_gtc not in trailer_row_data:
-                                trailer_row_data[clean_gtc] = set()
-                            trailer_row_data[clean_gtc].add(c_line)
+                            clean_gt = clean_val(m)
+                            cldn_units.add(clean_gt)
+                            if clean_gt not in trailer_row_data:
+                                trailer_row_data[clean_gt] = set()
+                            trailer_row_data[clean_gt].add(c_line)
 
                 full_email_clean = clean_val(soup.get_text())
 
@@ -287,7 +287,7 @@ gtc_matches = re.findall(r"(?:GTC|GTUK)[\s-]?\d+", row_combined, re.IGNORECASE)
                         else ""
                     )
                     trailer_match = re.search(
-                        r"GTC[\s-]?\d+", raw_trailer, re.IGNORECASE
+                        TRAILER_REGEX, raw_trailer, re.IGNORECASE
                     )
                     clean_trailer = (
                         clean_val(trailer_match.group(0))
@@ -312,11 +312,8 @@ gtc_matches = re.findall(r"(?:GTC|GTUK)[\s-]?\d+", row_combined, re.IGNORECASE)
                         if instr_col and pd.notna(row[instr_col])
                         else ""
                     )
-                    trailer_match = re.search(r"(?:GTC|GTUK)[\s-]?\d+", raw_trailer, re.IGNORECASE)
-
-# Clean instructions check:
-instr_trailer_match = re.search(r"(?:GTC|GTUK)[\s-]?\d+", raw_instr, re.IGNORECASE)
-extra_notes = re.sub(r"(?:GTC|GTUK)[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip()
+                    instr_trailer_match = re.search(
+                        TRAILER_REGEX, raw_instr, re.IGNORECASE
                     )
                     instr_trailer_clean = (
                         clean_val(instr_trailer_match.group(0))
@@ -329,7 +326,7 @@ extra_notes = re.sub(r"(?:GTC|GTUK)[\s-]?\d+", "", clean_raw_text, flags=re.IGNO
                     )
                     extra_notes = (
                         re.sub(
-                            r"GTC[\s-]?\d+",
+                            TRAILER_REGEX,
                             "",
                             clean_raw_text,
                             flags=re.IGNORECASE,
@@ -358,7 +355,6 @@ extra_notes = re.sub(r"(?:GTC|GTUK)[\s-]?\d+", "", clean_raw_text, flags=re.IGNO
                         if not c_ref:
                             return "-"
 
-                        # Exact or substring match within the row tokens for that trailer
                         if any(c_ref in tok or tok in c_ref for tok in row_tokens):
                             return f"{ref_val} 🟢 Matched"
                         elif c_ref in full_email_clean:
