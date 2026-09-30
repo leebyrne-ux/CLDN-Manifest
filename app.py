@@ -1,3 +1,139 @@
+import email
+import email.utils
+import imaplib
+import re
+import zoneinfo
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(
+    page_title="CLdN Manifest Reconciliation", page_icon="🚢", layout="wide"
+)
+
+st.title("🚢 CLdN Manifest Reconciliation")
+st.write(
+    "Upload your Qargo export file (.csv or .xlsx) to reconcile trailers, instructions, GMR, PBN, and Booking Refs against CLdN sailing emails."
+)
+
+# Fetch Credentials from Secrets or defaults
+GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "bshg mcwd kahp xpqa")
+GMAIL_LABEL = "AA Shipping/CLDN"
+
+
+def format_to_gmt(raw_date_str):
+    """Converts raw email date headers (UTC) to formatted local GMT/IST time."""
+    if not raw_date_str:
+        return "Unknown Date"
+    try:
+        dt_utc = email.utils.parsedate_to_datetime(raw_date_str)
+        local_tz = zoneinfo.ZoneInfo("Europe/Dublin")
+        dt_local = dt_utc.astimezone(local_tz)
+        return dt_local.strftime("%a, %d %b %Y %H:%M:%S %Z")
+    except Exception:
+        return raw_date_str
+
+
+def get_recent_emails_list(user, app_pass, label, limit=10):
+    """Fetches subjects and GMT dates for the last N emails in the folder."""
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(user, app_pass)
+
+        status, _ = mail.select(f'"{label}"')
+        if status != "OK":
+            status, _ = mail.select("INBOX")
+            if status != "OK":
+                return {}
+
+        status, data = mail.search(None, "ALL")
+        mail_ids = data[0].split()
+
+        if not mail_ids:
+            return {}
+
+        recent_ids = mail_ids[-limit:]
+        recent_ids.reverse()
+
+        email_options = {}
+        for eid in recent_ids:
+            status, data = mail.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])")
+            msg = email.message_from_bytes(data[0][1])
+            subject = msg.get("Subject", "No Subject")
+            raw_date = msg.get("Date", "")
+
+            formatted_date = format_to_gmt(raw_date)
+            label_text = f"{subject} — ({formatted_date})"
+            email_options[label_text] = eid
+
+        mail.logout()
+        return email_options
+    except Exception as e:
+        st.error(f"❌ Error fetching email list: {e}")
+        return {}
+
+
+def fetch_email_body_by_id(user, app_pass, label, email_id):
+    """Fetches full body text for a selected email ID."""
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(user, app_pass)
+        mail.select(f'"{label}"')
+
+        status, data = mail.fetch(email_id, "(RFC822)")
+        raw_email = data[0][1]
+        msg = email.message_from_bytes(raw_email)
+
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() in ["text/plain", "text/html"]:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        body += payload.decode(errors="ignore") + "\n"
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                body = payload.decode(errors="ignore")
+
+        mail.logout()
+        return body
+    except Exception as e:
+        st.error(f"❌ Error fetching email body: {e}")
+        return ""
+
+
+def find_column(df, search_terms):
+    """Finds a column name in dataframe matching any search terms (case-insensitive)."""
+    for col in df.columns:
+        col_clean = str(col).strip().lower()
+        for term in search_terms:
+            if term.lower() in col_clean:
+                return col
+    return None
+
+
+# 1. Email Dropdown Selector
+selected_email_id = None
+if GMAIL_APP_PASS:
+    email_options = get_recent_emails_list(GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL)
+
+    if email_options:
+        selected_email_label = st.selectbox(
+            "📩 Select the CLdN Manifest Email to Reconcile:",
+            options=list(email_options.keys()),
+        )
+        selected_email_id = email_options[selected_email_label]
+    else:
+        st.warning("⚠️ No emails found in folder or connection failed.")
+else:
+    st.warning("⚠️ Gmail App Password missing in Streamlit Secrets.")
+
+# 2. File Upload Section
+uploaded_file = st.file_uploader(
+    "Drop Qargo File (.csv, .xlsx, or .xls)", type=["csv", "xlsx", "xls"]
+)
+
 # 3. Execution & Results
 if uploaded_file and GMAIL_APP_PASS and selected_email_id:
     if st.button("Run Reconciliation", type="primary", use_container_width=True):
@@ -80,7 +216,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
                         instr_status = f"⚠️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
                     elif extra_notes:
-                        instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
+                        instr_status = f"⚠️️ Flagged Note: {clean_raw_text}"
                     else:
                         instr_status = "Clean 🟢"
 
@@ -90,7 +226,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     if raw_gmr and raw_gmr.lower() != "nan":
                         if specific_email_row:
                             gmr_in_row = raw_gmr.lower() in specific_email_row
-                            gmr_status = f"{raw_gmr} " + ("🟢 Matched" if gmr_in_row else "⚠️ Swapped / Mismatch")
+                            gmr_status = f"{raw_gmr} " + ("🟢 Matched" if gmr_in_row else "⚠️️ Swapped / Mismatch")
                         else:
                             gmr_status = f"{raw_gmr} 🔴 Line Missing"
 
