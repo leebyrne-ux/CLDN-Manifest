@@ -33,13 +33,13 @@ def format_to_gmt(raw_date_str):
         return raw_date_str
 
 
-@st.cache_data(ttl=300)
-def get_recent_emails_list(user, app_pass, label, limit=10):
+def fetch_email_options():
+    """Connects to Gmail safely with timeout."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
-        mail.login(user, app_pass)
+        mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
-        status, _ = mail.select(f'"{label}"')
+        status, _ = mail.select(f'"{GMAIL_LABEL}"')
         if status != "OK":
             status, _ = mail.select("INBOX")
             if status != "OK":
@@ -51,7 +51,7 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
         if not mail_ids:
             return {}
 
-        recent_ids = mail_ids[-limit:]
+        recent_ids = mail_ids[-10:]
         recent_ids.reverse()
 
         email_options = {}
@@ -72,12 +72,12 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
         return {}
 
 
-@st.cache_data(ttl=300)
-def fetch_email_body_by_id(user, app_pass, label, email_id):
+def fetch_email_body(email_id):
+    """Fetches body content for selected message ID."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
-        mail.login(user, app_pass)
-        mail.select(f'"{label}"')
+        mail.login(GMAIL_USER, GMAIL_APP_PASS)
+        mail.select(f'"{GMAIL_LABEL}"')
 
         status, data = mail.fetch(email_id, "(RFC822)")
         raw_email = data[0][1]
@@ -117,37 +117,39 @@ def clean_val(val):
     return re.sub(r"[^\w]", "", str(val)).upper()
 
 
-# 1. Email Dropdown Selector
-selected_email_id = None
-if GMAIL_APP_PASS:
-    email_options = get_recent_emails_list(GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL)
+# Render Uploader
+uploaded_file = st.file_uploader(
+    "Drop Qargo File (.csv, .xlsx, or .xls)", type=["csv", "xlsx", "xls"]
+)
 
-    if email_options:
-        selected_email_label = st.selectbox(
+# Fetch Email List
+if GMAIL_APP_PASS:
+    if "email_options" not in st.session_state:
+        with st.spinner("Connecting to Gmail..."):
+            st.session_state.email_options = fetch_email_options()
+
+    if st.session_state.email_options:
+        selected_label = st.selectbox(
             "📩 Select the CLdN Manifest Email to Reconcile:",
-            options=list(email_options.keys()),
+            options=list(st.session_state.email_options.keys()),
         )
-        selected_email_id = email_options[selected_email_label]
+        selected_email_id = st.session_state.email_options[selected_label]
+        
+        if st.button("🔄 Refresh Email List"):
+            st.session_state.email_options = fetch_email_options()
+            st.rerun()
     else:
         st.warning("⚠️ No emails found in folder or connection failed.")
 else:
     st.warning("⚠️ Gmail App Password missing in Streamlit Secrets.")
 
-# 2. File Upload Section
-uploaded_file = st.file_uploader(
-    "Drop Qargo File (.csv, .xlsx, or .xls)", type=["csv", "xlsx", "xls"]
-)
-
-# 3. Execution & Results
+# Execution
 if uploaded_file and GMAIL_APP_PASS and selected_email_id:
     if st.button("Run Reconciliation", type="primary", use_container_width=True):
         with st.spinner("Processing reconciliation..."):
 
-            email_body = fetch_email_body_by_id(
-                GMAIL_USER, GMAIL_APP_PASS, GMAIL_LABEL, selected_email_id
-            )
+            email_body = fetch_email_body(selected_email_id)
 
-            # Read Qargo File
             try:
                 if uploaded_file.name.endswith((".xlsx", ".xls")):
                     df = pd.read_excel(uploaded_file)
@@ -171,7 +173,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # Parse HTML structure safely
+                # Parse HTML structure
                 soup = BeautifulSoup(email_body, "html.parser")
                 trailer_blocks = {}
                 cldn_units = set()
@@ -249,7 +251,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         "Booking Ref": verify_ref(raw_booking)
                     })
 
-                # Check Forward Shipped Units
+                # Forward Shipped Units
                 qargo_found_units = set(r["Trailer ID"] for r in results_data)
                 forward_shipped = cldn_units - qargo_found_units
 
@@ -275,7 +277,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
