@@ -21,7 +21,6 @@ GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
 GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "bshg mcwd kahp xpqa")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
-# Set default socket timeout so IMAP never hangs the browser indefinitely
 socket.setdefaulttimeout(4.0)
 
 
@@ -38,7 +37,6 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """Fetches recent emails with a strict timeout to prevent app hanging."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
@@ -56,7 +54,6 @@ def fetch_sailing_emails_fast():
             mail.logout()
             return {}
 
-        # Inspect last 15 messages max
         recent_ids = list(reversed(mail_ids[-15:]))
         email_options = {}
 
@@ -136,7 +133,7 @@ uploaded_file = st.file_uploader(
 
 st.divider()
 
-# 2. Email Input Modes (Dropdown vs Paste Fallback)
+# 2. Email Input Modes
 st.subheader("2️⃣ Select or Paste CLdN Manifest Email")
 
 input_tab1, input_tab2 = st.tabs(
@@ -188,7 +185,6 @@ if uploaded_file and (selected_email_id or pasted_email_content):
     if st.button("🚀 Run Reconciliation", type="primary", use_container_width=True):
         with st.spinner("Processing reconciliation..."):
 
-            # Get email body from selected dropdown OR pasted text
             if pasted_email_content.strip():
                 email_body = pasted_email_content
             else:
@@ -225,35 +221,30 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     df, ["booking ref", "booking reference", "booking"]
                 )
 
-                # Parse HTML structure
+                # Parse HTML structure with BeautifulSoup
                 soup = BeautifulSoup(email_body, "html.parser")
-                trailer_blocks = {}
+                
+                # Extract structured table rows
                 cldn_units = set()
+                trailer_row_data = {}  # Map: CLEAN_TRAILER -> Set of clean cell values in that row
 
                 rows = soup.find_all("tr")
-                if rows:
-                    for tr in rows:
-                        row_text = clean_val(tr.get_text(separator=" "))
-                        matches = re.findall(
-                            r"GTC[\s-]?\d+", row_text, re.IGNORECASE
-                        )
-                        for m in matches:
-                            clean_m = clean_val(m)
-                            cldn_units.add(clean_m)
-                            trailer_blocks[clean_m] = row_text
-                else:
-                    # Fallback for plain-text or pasted unformatted text
-                    lines = email_body.splitlines()
-                    for line in lines:
-                        row_text = clean_val(line)
-                        matches = re.findall(
-                            r"GTC[\s-]?\d+", row_text, re.IGNORECASE
-                        )
-                        for m in matches:
-                            clean_m = clean_val(m)
-                            cldn_units.add(clean_m)
-                            trailer_blocks[clean_m] = row_text
+                for tr in rows:
+                    cells = tr.find_all(["td", "th"])
+                    if not cells:
+                        continue
+                    
+                    cell_values = [clean_val(c.get_text()) for c in cells if clean_val(c.get_text())]
+                    row_combined = " ".join(cell_values)
+                    
+                    # Extract any trailer ID in this row
+                    gtc_matches = re.findall(r"GTC[\s-]?\d+", row_combined, re.IGNORECASE)
+                    for m in gtc_matches:
+                        clean_gtc = clean_val(m)
+                        cldn_units.add(clean_gtc)
+                        trailer_row_data[clean_gtc] = set(cell_values)
 
+                # Plaintext fallback for whole email search
                 full_email_clean = clean_val(soup.get_text())
 
                 st.subheader("📋 Reconciliation Results")
@@ -328,14 +319,15 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         instr_status = "Clean 🟢"
 
                     # 3. Reference Row Validator
-                    t_block = trailer_blocks.get(clean_trailer, "")
+                    row_cells = trailer_row_data.get(clean_trailer, set())
 
                     def verify_ref(ref_val):
                         c_ref = clean_val(ref_val)
                         if not c_ref:
                             return "-"
 
-                        if t_block and c_ref in t_block:
+                        # Check if reference code exists directly in this trailer's row cells
+                        if any(c_ref in cell or cell in c_ref for cell in row_cells):
                             return f"{ref_val} 🟢 Matched"
                         elif c_ref in full_email_clean:
                             return f"{ref_val} ⚠️ Mismatch"
