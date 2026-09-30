@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import email
 import email.utils
 import imaplib
@@ -33,8 +34,8 @@ def format_to_gmt(raw_date_str):
         return raw_date_str
 
 
-def fetch_email_options():
-    """Connects to Gmail safely with timeout."""
+def fetch_sailing_emails_last_week():
+    """Fetches emails from the last 7 days containing 'Sailing Confirmation' in the subject."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
@@ -45,35 +46,42 @@ def fetch_email_options():
             if status != "OK":
                 return {}
 
-        status, data = mail.search(None, "ALL")
+        # Restrict to emails within the last 7 days
+        since_date = (datetime.now() - timedelta(days=7)).strftime("%d-%b-%Y")
+        status, data = mail.search(None, f'(SINCE "{since_date}")')
         mail_ids = data[0].split()
 
         if not mail_ids:
+            mail.logout()
             return {}
 
-        recent_ids = mail_ids[-10:]
-        recent_ids.reverse()
-
+        # Process IDs (newest first)
+        recent_ids = list(reversed(mail_ids))
         email_options = {}
+
         for eid in recent_ids:
             status, data = mail.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])")
+            if not data or not data[0]:
+                continue
             msg = email.message_from_bytes(data[0][1])
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
 
-            formatted_date = format_to_gmt(raw_date)
-            label_text = f"{subject} — ({formatted_date})"
-            email_options[label_text] = eid
+            # Filter strictly for 'Sailing Confirmation' in subject
+            if "sailing confirmation" in subject.lower():
+                formatted_date = format_to_gmt(raw_date)
+                label_text = f"{subject} — ({formatted_date})"
+                email_options[label_text] = eid
 
         mail.logout()
         return email_options
     except Exception as e:
-        st.error(f"❌ Error fetching email list: {e}")
+        st.error(f"❌ Error fetching emails: {e}")
         return {}
 
 
 def fetch_email_body(email_id):
-    """Fetches body content for selected message ID."""
+    """Fetches full body text/HTML for the selected email ID."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
@@ -117,33 +125,44 @@ def clean_val(val):
     return re.sub(r"[^\w]", "", str(val)).upper()
 
 
-# Render Uploader
+# 1. File Upload Section
 uploaded_file = st.file_uploader(
     "Drop Qargo File (.csv, .xlsx, or .xls)", type=["csv", "xlsx", "xls"]
 )
 
-# Fetch Email List
+# 2. Email Selector Section
+selected_email_id = None
 if GMAIL_APP_PASS:
+    col_sel, col_btn = st.columns([4, 1])
+    
+    # Load email list into session state once
     if "email_options" not in st.session_state:
-        with st.spinner("Connecting to Gmail..."):
-            st.session_state.email_options = fetch_email_options()
+        st.session_state.email_options = None
 
-    if st.session_state.email_options:
-        selected_label = st.selectbox(
-            "📩 Select the CLdN Manifest Email to Reconcile:",
-            options=list(st.session_state.email_options.keys()),
-        )
-        selected_email_id = st.session_state.email_options[selected_label]
-        
-        if st.button("🔄 Refresh Email List"):
-            st.session_state.email_options = fetch_email_options()
-            st.rerun()
-    else:
-        st.warning("⚠️ No emails found in folder or connection failed.")
+    with col_sel:
+        if st.session_state.email_options is None:
+            if st.button("📩 Load CLdN Sailing Emails"):
+                with st.spinner("Fetching emails from past 7 days..."):
+                    st.session_state.email_options = fetch_sailing_emails_last_week()
+                st.rerun()
+        elif st.session_state.email_options:
+            selected_label = st.selectbox(
+                "📩 Select CLdN Sailing Email:",
+                options=list(st.session_state.email_options.keys()),
+            )
+            selected_email_id = st.session_state.email_options[selected_label]
+        else:
+            st.warning("⚠️ No 'Sailing Confirmation' emails found in the last 7 days.")
+
+    with col_btn:
+        if st.session_state.email_options is not None:
+            if st.button("🔄 Refresh"):
+                st.session_state.email_options = fetch_sailing_emails_last_week()
+                st.rerun()
 else:
     st.warning("⚠️ Gmail App Password missing in Streamlit Secrets.")
 
-# Execution
+# 3. Reconciliation Execution
 if uploaded_file and GMAIL_APP_PASS and selected_email_id:
     if st.button("Run Reconciliation", type="primary", use_container_width=True):
         with st.spinner("Processing reconciliation..."):
@@ -277,7 +296,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️️" in r["Booking Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
