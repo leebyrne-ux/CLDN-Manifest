@@ -169,12 +169,17 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # Extract trailer IDs present anywhere in the email
-                cldn_raw = re.findall(r"GTC[\s-]?\d+", email_body, re.IGNORECASE)
+                # Clean HTML tags into standardized line breaks to handle HTML tables
+                clean_email_text = re.sub(r'<tr[^>]*>', '\n', email_body, flags=re.IGNORECASE)
+                clean_email_text = re.sub(r'<br\s*/?>', '\n', clean_email_text, flags=re.IGNORECASE)
+                clean_email_text = re.sub(r'<[^>]+>', ' ', clean_email_text)
+
+                # Extract all GTC trailer IDs
+                cldn_raw = re.findall(r"GTC[\s-]?\d+", clean_email_text, re.IGNORECASE)
                 cldn_units = set(re.sub(r"[\s-]", "", t).upper() for t in cldn_raw)
 
-                # Map each trailer to its specific row/line in the CLdN email
-                email_lines = email_body.splitlines()
+                # Map each trailer to its specific HTML row block
+                email_lines = clean_email_text.splitlines()
                 trailer_email_row_map = {}
                 for line in email_lines:
                     matches = re.findall(r"GTC[\s-]?\d+", line, re.IGNORECASE)
@@ -216,47 +221,34 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
                         instr_status = f"⚠️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
                     elif extra_notes:
-                        instr_status = f"⚠️️ Flagged Note: {clean_raw_text}"
+                        instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
                     else:
                         instr_status = "Clean 🟢"
 
-                    # 3. Cross-reference GMR (Row Specific)
+                    # Helper function to evaluate row match vs global match
+                    def verify_reference(ref_val):
+                        if not ref_val or ref_val.lower() == "nan":
+                            return "-"
+                        ref_lower = ref_val.lower()
+                        if specific_email_row and ref_lower in specific_email_row:
+                            return f"{ref_val} 🟢 Matched"
+                        elif ref_lower in clean_email_text.lower():
+                            return f"{ref_val} ⚠️ Swapped (Row Mismatch)"
+                        else:
+                            return f"{ref_val} 🔴 Missing in Email"
+
+                    # 3. Cross-references
                     raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
-                    gmr_status = "-"
-                    if raw_gmr and raw_gmr.lower() != "nan":
-                        if specific_email_row:
-                            gmr_in_row = raw_gmr.lower() in specific_email_row
-                            gmr_status = f"{raw_gmr} " + ("🟢 Matched" if gmr_in_row else "⚠️️ Swapped / Mismatch")
-                        else:
-                            gmr_status = f"{raw_gmr} 🔴 Line Missing"
-
-                    # 4. Cross-reference PBN (Row Specific)
                     raw_pbn = str(row[pbn_col]).strip() if pbn_col and pd.notna(row[pbn_col]) else ""
-                    pbn_status = "-"
-                    if raw_pbn and raw_pbn.lower() != "nan":
-                        if specific_email_row:
-                            pbn_in_row = raw_pbn.lower() in specific_email_row
-                            pbn_status = f"{raw_pbn} " + ("🟢 Matched" if pbn_in_row else "⚠️ Swapped / Mismatch")
-                        else:
-                            pbn_status = f"{raw_pbn} 🔴 Line Missing"
-
-                    # 5. Cross-reference Booking Ref (Row Specific)
                     raw_booking = str(row[booking_col]).strip() if booking_col and pd.notna(row[booking_col]) else ""
-                    booking_status = "-"
-                    if raw_booking and raw_booking.lower() != "nan":
-                        if specific_email_row:
-                            booking_in_row = raw_booking.lower() in specific_email_row
-                            booking_status = f"{raw_booking} " + ("🟢 Matched" if booking_in_row else "⚠️ Swapped / Mismatch")
-                        else:
-                            booking_status = f"{raw_booking} 🔴 Line Missing"
 
                     results_data.append({
                         "Trailer ID": clean_trailer,
                         "Sailing Status": status,
                         "Instructions Check": instr_status,
-                        "GMR Ref": gmr_status,
-                        "PBN Ref": pbn_status,
-                        "Booking Ref": booking_status
+                        "GMR Ref": verify_reference(raw_gmr),
+                        "PBN Ref": verify_reference(raw_pbn),
+                        "Booking Ref": verify_reference(raw_booking)
                     })
 
                 # Check for Forward Shipped units
@@ -285,7 +277,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️️" in r["GMR Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
