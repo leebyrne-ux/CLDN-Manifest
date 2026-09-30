@@ -306,7 +306,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         else "Not Present (Left Behind) 🔴"
                     )
 
-                    # 2. Check Instructions Column in Qargo
+                    # 2. Strict Instructions Check (Trailer Match Only)
                     raw_instr = (
                         str(row[instr_col]).strip()
                         if instr_col and pd.notna(row[instr_col])
@@ -321,29 +321,8 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         else ""
                     )
 
-                    clean_raw_text = (
-                        raw_instr if raw_instr.lower() != "nan" else ""
-                    )
-                    extra_notes = (
-                        re.sub(
-                            TRAILER_REGEX,
-                            "",
-                            clean_raw_text,
-                            flags=re.IGNORECASE,
-                        ).strip()
-                        if clean_raw_text
-                        else ""
-                    )
-
-                    if not clean_raw_text:
-                        instr_status = "Clean 🟢"
-                    elif (
-                        instr_trailer_clean
-                        and instr_trailer_clean != clean_trailer
-                    ):
-                        instr_status = f"⚠️ Mismatch: {clean_raw_text}"
-                    elif extra_notes:
-                        instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
+                    if instr_trailer_clean and instr_trailer_clean != clean_trailer:
+                        instr_status = f"⚠️ Mismatch: {instr_trailer_clean} (Expected {clean_trailer})"
                     else:
                         instr_status = "Clean 🟢"
 
