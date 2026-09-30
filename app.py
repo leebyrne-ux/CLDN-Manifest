@@ -175,30 +175,33 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # Parse text cleanly using BeautifulSoup
+                # Parse HTML structure with BeautifulSoup
                 soup = BeautifulSoup(email_body, "html.parser")
-                raw_text_content = soup.get_text(separator=" ", strip=True)
-                clean_email_content = clean_val(raw_text_content)
 
-                # Extract all GTC trailers
-                cldn_raw = re.findall(r"GTC[\s-]?\d+", raw_text_content, re.IGNORECASE)
-                cldn_units = set(clean_val(t) for t in cldn_raw)
+                trailer_blocks = {}
+                cldn_units = set()
 
-                # --- PROXIMITY BLOCK PARSER ---
-                # Locates each trailer's start character index in the cleaned email string
-                trailer_positions = []
-                for t in cldn_units:
-                    for m in re.finditer(re.escape(t), clean_email_content):
-                        trailer_positions.append((m.start(), t))
+                rows = soup.find_all("tr")
+                if rows:
+                    for tr in rows:
+                        row_text = clean_val(tr.get_text(separator=" "))
+                        matches = re.findall(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
+                        for m in matches:
+                            clean_m = clean_val(m)
+                            cldn_units.add(clean_m)
+                            trailer_blocks[clean_m] = row_text
+                else:
+                    # Fallback for plain-text email bodies
+                    lines = soup.get_text().splitlines()
+                    for line in lines:
+                        row_text = clean_val(line)
+                        matches = re.findall(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
+                        for m in matches:
+                            clean_m = clean_val(m)
+                            cldn_units.add(clean_m)
+                            trailer_blocks[clean_m] = row_text
 
-                trailer_positions.sort(key=lambda x: x[0])
-
-                # Build a dictionary containing the text block following each trailer ID up to the next trailer ID
-                trailer_text_blocks = {}
-                for i in range(len(trailer_positions)):
-                    pos, t = trailer_positions[i]
-                    next_pos = trailer_positions[i+1][0] if i + 1 < len(trailer_positions) else pos + 500
-                    trailer_text_blocks[t] = clean_email_content[pos:next_pos]
+                full_email_clean = clean_val(soup.get_text())
 
                 st.divider()
                 st.subheader("📋 Reconciliation Results")
@@ -235,18 +238,18 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     else:
                         instr_status = "Clean 🟢"
 
-                    # 3. Check Row References against the specific trailer's text block
-                    trailer_block = trailer_text_blocks.get(clean_trailer, "")
+                    # 3. Reference Row Validator
+                    t_block = trailer_blocks.get(clean_trailer, "")
 
                     def verify_ref(ref_val):
                         c_ref = clean_val(ref_val)
                         if not c_ref:
                             return "-"
 
-                        # Check if reference code is present in this trailer's specific section
-                        if trailer_block and c_ref in trailer_block:
+                        # Check if reference is inside this trailer's HTML row
+                        if t_block and c_ref in t_block:
                             return f"{ref_val} 🟢 Matched"
-                        elif c_ref in clean_email_content:
+                        elif c_ref in full_email_clean:
                             return f"{ref_val} ⚠️ Mismatch"
                         else:
                             return f"{ref_val} 🔴 Missing"
@@ -282,7 +285,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 results_df = pd.DataFrame(results_data)
                 st.dataframe(results_df, use_container_width=True, hide_index=True)
 
-                # Summary Totals
+                # Summary Metrics
                 st.divider()
                 st.subheader("📊 Summary Metrics")
                 c1, c2, c3, c4 = st.columns(4)
@@ -290,7 +293,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
