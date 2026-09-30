@@ -192,10 +192,42 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                     in_email = clean_trailer in cldn_units
                     status = "Matched 🟢" if in_email else "Not Present (Left Behind) 🔴"
 
-                    # 2. Check Instructions Column
-                    raw_instr = str(row[instr_col]).strip() if instr_col and pd.notna(row[instr_col]) else ""
-                    has_instructions = bool(raw_instr and raw_instr.lower() != "nan")
-                    instr_status = f"⚠️ Flagged: {raw_instr}" if has_instructions else "Clean (Blank) 🟢"
+                    # NEW SMART INSTRUCTION LOGIC:
+raw_instr = (
+    str(row[instr_col]).strip()
+    if instr_col and pd.notna(row[instr_col])
+    else ""
+)
+
+# Extract any trailer ID mentioned inside the instruction text itself
+instr_trailer_match = re.search(r"GTC[\s-]?\d+", raw_instr, re.IGNORECASE)
+instr_trailer_clean = (
+    re.sub(r"[\s-]", "", instr_trailer_match.group(0)).upper()
+    if instr_trailer_match
+    else ""
+)
+
+# Clean up raw_instr string (remove "nan" or plain repeated trailer)
+clean_raw_text = raw_instr if raw_instr.lower() != "nan" else ""
+
+# Check if instruction has actual extra notes (e.g. "DGN SENT")
+extra_notes = (
+    re.sub(r"GTC[\s-]?\d+", "", clean_raw_text, flags=re.IGNORECASE).strip()
+    if clean_raw_text
+    else ""
+)
+
+if not clean_raw_text:
+    instr_status = "Clean (Blank) 🟢"
+elif instr_trailer_clean and instr_trailer_clean != clean_trailer:
+    # Mismatch detected (e.g. Row is GTC227 but instruction says GTC226)
+    instr_status = f"⚠️ Mismatch: {clean_raw_text} (Expected {clean_trailer})"
+elif extra_notes:
+    # Extra instructions exist (e.g. "GTC345 DGN SENT")
+    instr_status = f"⚠️ Flagged Note: {clean_raw_text}"
+else:
+    # Text was just a plain repeat of its own trailer ID (e.g. "GTC206")
+    instr_status = "Clean 🟢"
 
                     # 3. Cross-reference GMR
                     raw_gmr = str(row[gmr_col]).strip() if gmr_col and pd.notna(row[gmr_col]) else ""
