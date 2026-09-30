@@ -16,14 +16,12 @@ st.write(
     "Upload your Qargo export file (.csv or .xlsx) to reconcile trailers, instructions, GMR, PBN, and Booking Refs against CLdN sailing emails."
 )
 
-# Fetch Credentials from Secrets or defaults
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
 GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "bshg mcwd kahp xpqa")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 
 def format_to_gmt(raw_date_str):
-    """Converts raw email date headers (UTC) to formatted local GMT/IST time."""
     if not raw_date_str:
         return "Unknown Date"
     try:
@@ -35,10 +33,10 @@ def format_to_gmt(raw_date_str):
         return raw_date_str
 
 
+@st.cache_data(ttl=300)
 def get_recent_emails_list(user, app_pass, label, limit=10):
-    """Fetches subjects and GMT dates for the last N emails in the folder."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(user, app_pass)
 
         status, _ = mail.select(f'"{label}"')
@@ -74,10 +72,10 @@ def get_recent_emails_list(user, app_pass, label, limit=10):
         return {}
 
 
+@st.cache_data(ttl=300)
 def fetch_email_body_by_id(user, app_pass, label, email_id):
-    """Fetches full body text & HTML for a selected email ID."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(user, app_pass)
         mail.select(f'"{label}"')
 
@@ -105,7 +103,6 @@ def fetch_email_body_by_id(user, app_pass, label, email_id):
 
 
 def find_column(df, search_terms):
-    """Finds a column name in dataframe matching search terms."""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for term in search_terms:
@@ -115,7 +112,6 @@ def find_column(df, search_terms):
 
 
 def clean_val(val):
-    """Strips spaces, hyphens, and non-alphanumeric chars for strict string matching."""
     if not val or pd.isna(val) or str(val).lower() == "nan":
         return ""
     return re.sub(r"[^\w]", "", str(val)).upper()
@@ -175,31 +171,19 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 pbn_col = find_column(df, ["pbn"])
                 booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
 
-                # Parse HTML structure with BeautifulSoup
+                # Parse HTML structure safely
                 soup = BeautifulSoup(email_body, "html.parser")
-
                 trailer_blocks = {}
                 cldn_units = set()
 
                 rows = soup.find_all("tr")
-                if rows:
-                    for tr in rows:
-                        row_text = clean_val(tr.get_text(separator=" "))
-                        matches = re.findall(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
-                        for m in matches:
-                            clean_m = clean_val(m)
-                            cldn_units.add(clean_m)
-                            trailer_blocks[clean_m] = row_text
-                else:
-                    # Fallback for plain-text email bodies
-                    lines = soup.get_text().splitlines()
-                    for line in lines:
-                        row_text = clean_val(line)
-                        matches = re.findall(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
-                        for m in matches:
-                            clean_m = clean_val(m)
-                            cldn_units.add(clean_m)
-                            trailer_blocks[clean_m] = row_text
+                for tr in rows:
+                    row_text = clean_val(tr.get_text(separator=" "))
+                    matches = re.findall(r"GTC[\s-]?\d+", row_text, re.IGNORECASE)
+                    for m in matches:
+                        clean_m = clean_val(m)
+                        cldn_units.add(clean_m)
+                        trailer_blocks[clean_m] = row_text
 
                 full_email_clean = clean_val(soup.get_text())
 
@@ -209,7 +193,6 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 results_data = []
 
                 for idx, row in df.iterrows():
-                    # Parse Trailer ID
                     raw_trailer = str(row[trailer_col]) if trailer_col and pd.notna(row[trailer_col]) else ""
                     trailer_match = re.search(r"GTC[\s-]?\d+", raw_trailer, re.IGNORECASE)
                     clean_trailer = clean_val(trailer_match.group(0)) if trailer_match else clean_val(raw_trailer)
@@ -246,7 +229,6 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                         if not c_ref:
                             return "-"
 
-                        # Check if reference is inside this trailer's HTML row
                         if t_block and c_ref in t_block:
                             return f"{ref_val} 🟢 Matched"
                         elif c_ref in full_email_clean:
@@ -293,7 +275,7 @@ if uploaded_file and GMAIL_APP_PASS and selected_email_id:
                 matched_cnt = sum(1 for r in results_data if "Matched" in r["Sailing Status"])
                 left_cnt = sum(1 for r in results_data if "Left Behind" in r["Sailing Status"])
                 forward_cnt = sum(1 for r in results_data if "Forward Shipped" in r["Sailing Status"])
-                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️️" in r["Booking Ref"])
+                flagged_cnt = sum(1 for r in results_data if "⚠️" in r["Instructions Check"] or "⚠️" in r["PBN Ref"] or "⚠️" in r["GMR Ref"] or "⚠️" in r["Booking Ref"])
 
                 c1.metric("Matched Trailers", matched_cnt)
                 c2.metric("Left Behind", left_cnt)
