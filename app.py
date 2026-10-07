@@ -40,7 +40,6 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    def fetch_sailing_emails_fast():
     """Connect to Gmail and diagnose available IMAP folders."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
