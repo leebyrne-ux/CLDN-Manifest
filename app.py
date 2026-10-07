@@ -164,32 +164,46 @@ input_tab1, input_tab2 = st.tabs(
 selected_email_info = None
 pasted_email_content = ""
 
+```python
 with input_tab1:
     if "email_options" not in st.session_state:
         st.session_state.email_options = None
 
     c1, c2 = st.columns([3, 1])
+
     with c1:
         if st.session_state.email_options is None:
-                      if st.button("🔌 Connect & Load Recent Emails"):
+            if st.button("🔌 Connect & Load Recent Emails"):
                 with st.spinner("Connecting to Gmail..."):
                     st.session_state.email_options = (
                         fetch_sailing_emails_fast()
                     )
+
         elif st.session_state.email_options:
-            selected_label = st.selectbox(
-                "Select CLdN Sailing Email:",
-                options=list(st.session_state.email_options.keys()),
+            email_keys = list(st.session_state.email_options.keys())
+
+            selected_email = st.selectbox(
+                "Select sailing email",
+                email_keys,
+                format_func=lambda x: (
+                    st.session_state.email_options[x]["subject"]
+                    + " — "
+                    + st.session_state.email_options[x]["date"]
+                ),
             )
-            selected_email_info = st.session_state.email_options[selected_label]
+
+            st.session_state.selected_email = selected_email
+
         else:
             st.warning("No emails found in 'AA Shipping/CLDN'.")
 
     with c2:
-        if st.session_state.email_options is not None:
-            if st.button("🔄 Refresh Emails"):
-                st.session_state.email_options = fetch_sailing_emails_fast()
-                st.rerun()
+        if st.button("🔄 Reset"):
+            st.session_state.email_options = None
+            st.session_state.selected_email = None
+            st.rerun()
+```
+)
 
 with input_tab2:
     pasted_email_content = st.text_area(
