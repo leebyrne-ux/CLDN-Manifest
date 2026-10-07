@@ -30,7 +30,7 @@ GMAIL_USER = st.secrets.get(
     "lee.byrne@gogginstransport.ie",
 )
 
-GMAIL_APP_PASS = st.secrets.get("lhhv cwyd tcjd pzkg", "")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 
 GMAIL_LABEL = "AA Shipping/CLDN"
 
