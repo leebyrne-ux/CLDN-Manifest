@@ -40,46 +40,43 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """Connect to Gmail and diagnose available IMAP folders."""
+    """Connect to Gmail and show the actual IMAP folders."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
         st.success("✅ Gmail login successful")
 
-        # Ask Gmail for the actual IMAP folders/labels
+        # Ask Gmail for its actual IMAP folders / labels
         status, folders = mail.list()
 
         if status != "OK":
-            st.error(f"❌ Gmail connected, but folder list failed: {status}")
+            st.error(
+                f"❌ Gmail connected, but folder list failed: {status}"
+            )
             mail.logout()
             return {}
 
         st.subheader("🔎 Gmail IMAP folders detected")
 
-        for folder in folders:
-            if isinstance(folder, bytes):
-                folder_text = folder.decode(errors="replace")
-            else:
-                folder_text = str(folder)
+        if not folders:
+            st.warning("⚠️ Gmail returned no IMAP folders.")
+        else:
+            for folder in folders:
+                if isinstance(folder, bytes):
+                    folder_text = folder.decode(errors="replace")
+                else:
+                    folder_text = str(folder)
 
-            st.code(folder_text)
+                st.code(folder_text)
 
         mail.logout()
 
         st.info(
-            "Diagnostic complete. Send me the folder list shown above."
+            "Diagnostic complete. Please send me the folder list shown above."
         )
 
         return {}
-
-    except Exception as e:
-        st.error(
-            f"❌ Gmail connection error: "
-            f"{type(e).__name__}: {e}"
-        )
-        return {}
-
 
     except Exception as e:
         st.error(
@@ -174,12 +171,11 @@ with input_tab1:
     c1, c2 = st.columns([3, 1])
     with c1:
         if st.session_state.email_options is None:
-            if st.button("🔌 Connect & Load Recent Emails"):
-                with st.spinner("Searching Gmail label 'AA Shipping/CLDN'..."):
-                    st.session_state.email_options = (
-                        fetch_sailing_emails_fast()
-                    )
-                st.rerun()
+           if st.button("🔌 Connect & Load Recent Emails"):
+    with st.spinner("Connecting to Gmail..."):
+        st.session_state.email_options = (
+            fetch_sailing_emails_fast()
+        )
         elif st.session_state.email_options:
             selected_label = st.selectbox(
                 "Select CLdN Sailing Email:",
