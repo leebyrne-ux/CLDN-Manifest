@@ -469,20 +469,15 @@ if uploaded_file and (
         with st.spinner(
             "Processing reconciliation..."
         ):
+               if pasted_email_content.strip():
+    email_body = pasted_email_content
+else:
+    email_body = fetch_email_body_fast(
+        selected_email_info
+    )
 
-            if pasted_email_content.strip():
-
-                email_body = (
-                    pasted_email_content
-                )
-
-            else:
-
-                email_body = (
-                    fetch_email_body_fast(
-                        selected_email_info
-                    )
-                )
+st.write("Email body length:", len(email_body))
+st.code(email_body[:5000])
 
             # ------------------------------------------------
             # Read Qargo file
