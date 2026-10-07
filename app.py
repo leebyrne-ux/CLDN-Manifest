@@ -171,11 +171,11 @@ with input_tab1:
     c1, c2 = st.columns([3, 1])
     with c1:
         if st.session_state.email_options is None:
-           if st.button("🔌 Connect & Load Recent Emails"):
-    with st.spinner("Connecting to Gmail..."):
-        st.session_state.email_options = (
-            fetch_sailing_emails_fast()
-        )
+                      if st.button("🔌 Connect & Load Recent Emails"):
+                with st.spinner("Connecting to Gmail..."):
+                    st.session_state.email_options = (
+                        fetch_sailing_emails_fast()
+                    )
         elif st.session_state.email_options:
             selected_label = st.selectbox(
                 "Select CLdN Sailing Email:",
