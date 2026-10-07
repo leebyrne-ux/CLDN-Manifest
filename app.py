@@ -57,12 +57,7 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """
-    Connect to Gmail and display the actual IMAP folders/labels.
-
-    This is currently diagnostic so we can determine exactly how
-    Gmail is exposing the AA Shipping/CLDN label through IMAP.
-    """
+    """Connect to Gmail and load recent emails from AA Shipping/CLDN."""
 
     try:
         mail = imaplib.IMAP4_SSL(
@@ -77,44 +72,112 @@ def fetch_sailing_emails_fast():
 
         st.success("✅ Gmail login successful")
 
-        status, folders = mail.list()
+        # Gmail has confirmed this exact IMAP folder exists.
+        folder = '"AA Shipping/CLDN"'
+
+        status, data = mail.select(folder)
 
         if status != "OK":
             st.error(
-                f"❌ Gmail connected, but folder list failed: {status}"
+                f"❌ Could not open Gmail folder "
+                f"'AA Shipping/CLDN': {data}"
             )
-
             mail.logout()
             return {}
 
-        st.subheader("🔎 Gmail IMAP folders detected")
+        # Search all messages in the CLdN folder.
+        status, messages = mail.uid(
+            "search",
+            None,
+            "ALL",
+        )
 
-        if not folders:
+        if status != "OK":
+            st.error(
+                f"❌ Gmail search failed: {messages}"
+            )
+            mail.logout()
+            return {}
+
+        message_ids = messages[0].split()
+
+        if not message_ids:
             st.warning(
-                "⚠️ Gmail returned no IMAP folders."
+                "⚠️ The AA Shipping/CLDN folder is visible "
+                "to IMAP, but contains no messages."
+            )
+            mail.logout()
+            return {}
+
+        # Only inspect the 20 most recent messages.
+        recent_ids = message_ids[-20:]
+
+        email_options = {}
+
+        for email_id in reversed(recent_ids):
+
+            status, data = mail.uid(
+                "fetch",
+                email_id,
+                "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])",
             )
 
-        else:
-            for folder in folders:
+            if status != "OK" or not data:
+                continue
 
-                if isinstance(folder, bytes):
-                    folder_text = folder.decode(
-                        errors="replace"
-                    )
-                else:
-                    folder_text = str(folder)
+            raw_header = None
 
-                st.code(folder_text)
+            for item in data:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) > 1
+                    and isinstance(item[1], bytes)
+                ):
+                    raw_header = item[1]
+                    break
+
+            if not raw_header:
+                continue
+
+            msg = email.message_from_bytes(
+                raw_header
+            )
+
+            subject = msg.get(
+                "Subject",
+                "(No Subject)",
+            )
+
+            date_raw = msg.get(
+                "Date",
+                "",
+            )
+
+            date_display = format_to_gmt(
+                date_raw
+            )
+
+            email_options[
+                (email_id.decode(), folder)
+            ] = {
+                "subject": subject,
+                "date": date_display,
+            }
 
         mail.logout()
 
-        st.info(
-            "Diagnostic complete. "
-            "Send me the folder list shown above and we can identify "
-            "the exact Gmail IMAP folder name."
-        )
+        if email_options:
+            st.success(
+                f"✅ Found {len(email_options)} recent "
+                f"email(s) in AA Shipping/CLDN."
+            )
+        else:
+            st.warning(
+                "⚠️ No readable emails were found "
+                "in AA Shipping/CLDN."
+            )
 
-        return {}
+        return email_options
 
     except Exception as e:
 
@@ -124,7 +187,6 @@ def fetch_sailing_emails_fast():
         )
 
         return {}
-
 
 def fetch_email_body_fast(email_info):
     """Fetch the full HTML/plain-text email body."""
