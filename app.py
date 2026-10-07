@@ -42,25 +42,24 @@ def format_to_gmt(raw_date_str):
 def fetch_sailing_emails_fast():
     """Uses Gmail X-GM-LABELS and All Mail to reliably fetch labeled emails."""
     try:
-try:
-    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
-    mail.login(GMAIL_USER, GMAIL_APP_PASS)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
+        mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
-    mail_ids = []
-    selected_box = None
-except Exception as e:
-    st.error(f"❌ Gmail login failed: {type(e).__name__}: {e}")
-    return {}
-
-mail_ids = []
-selected_box = None
+        mail_ids = []
+        selected_box = None
 
         # Method 1: Search by Gmail Native Label in All Mail
         status, _ = mail.select('"[Gmail]/All Mail"')
         if status == "OK":
             selected_box = '"[Gmail]/All Mail"'
+
             # Search Gmail label X-GM-LABELS
-            status, data = mail.uid("search", None, f'X-GM-LABELS "{GMAIL_LABEL}"')
+            status, data = mail.uid(
+                "search",
+                None,
+                f'X-GM-LABELS "{GMAIL_LABEL}"'
+            )
+
             if status == "OK" and data[0]:
                 mail_ids = data[0].split()
 
@@ -68,16 +67,21 @@ selected_box = None
         if not mail_ids:
             for lbl in [f'"{GMAIL_LABEL}"', GMAIL_LABEL, "INBOX"]:
                 status, _ = mail.select(lbl)
+
                 if status == "OK":
                     selected_box = lbl
                     status, data = mail.search(None, "ALL")
+
                     if status == "OK" and data[0]:
                         mail_ids = data[0].split()
                         break
 
         if not mail_ids:
             mail.logout()
-            st.warning("⚠️ No emails found using label search. Trying fallback search...")
+            st.warning(
+                "⚠️ No emails found using label search. "
+                "Trying fallback search..."
+            )
             return {}
 
         # Fetch up to 20 most recent messages
@@ -85,8 +89,8 @@ selected_box = None
         email_options = {}
 
         for eid in recent_ids:
-            # Use UID fetch if selected from All Mail
-            fetch_cmd = f"(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])"
+            fetch_cmd = "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])"
+
             if "All Mail" in str(selected_box):
                 status, data = mail.uid("fetch", eid, fetch_cmd)
             else:
@@ -96,13 +100,20 @@ selected_box = None
                 continue
 
             # Extract headers cleanly
-            header_bytes = data[0][1] if isinstance(data[0], tuple) else data[1]
+            header_bytes = (
+                data[0][1]
+                if isinstance(data[0], tuple)
+                else data[1]
+            )
+
             msg = email.message_from_bytes(header_bytes)
+
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
 
             formatted_date = format_to_gmt(raw_date)
             label_text = f"{subject} — ({formatted_date})"
+
             email_options[label_text] = (eid, selected_box)
 
         mail.logout()
@@ -110,7 +121,9 @@ selected_box = None
 
     except Exception as e:
         st.error(
-            f"⚠️ Connection error: {e}. Use the 'Paste Raw Email Text/HTML' tab to run reconciliation manually!"
+            f"⚠️ Connection error: {type(e).__name__}: {e}. "
+            "Use the 'Paste Raw Email Text/HTML' tab to run "
+            "reconciliation manually!"
         )
         return {}
 
