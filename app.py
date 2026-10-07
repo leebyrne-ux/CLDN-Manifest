@@ -79,7 +79,6 @@ def fetch_sailing_emails_fast():
             f"{type(e).__name__}: {e}"
         )
         return {}
-```
 
 
     except Exception as e:
