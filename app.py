@@ -47,6 +47,14 @@ def fetch_sailing_emails_fast():
 
         mail_ids = []
         selected_box = None
+                # TEMPORARY DIAGNOSTIC: show Gmail's actual IMAP folders
+        status, folders = mail.list()
+
+        if status == "OK":
+            st.write("🔎 Gmail IMAP folders detected:")
+
+            for folder in folders:
+                st.code(str(folder))
 
         # Method 1: Search by Gmail Native Label in All Mail
                 # Search the Gmail label directly
