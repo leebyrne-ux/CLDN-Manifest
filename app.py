@@ -79,6 +79,15 @@ def fetch_sailing_emails_fast():
             f"{type(e).__name__}: {e}"
         )
         return {}
+```
+
+
+    except Exception as e:
+        st.error(
+            f"❌ Gmail connection error: "
+            f"{type(e).__name__}: {e}"
+        )
+        return {}
 
 def fetch_email_body_fast(email_info):
     """Fetches full HTML email body by UID/ID."""
