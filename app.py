@@ -43,14 +43,15 @@ def fetch_sailing_emails_fast():
     """Uses Gmail X-GM-LABELS and All Mail to reliably fetch labeled emails."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
-        try:
+
+try:
     mail.login(GMAIL_USER, GMAIL_APP_PASS)
 except Exception as e:
     st.error(f"❌ Gmail login failed: {type(e).__name__}: {e}")
     return {}
 
-        mail_ids = []
-        selected_box = None
+mail_ids = []
+selected_box = None
 
         # Method 1: Search by Gmail Native Label in All Mail
         status, _ = mail.select('"[Gmail]/All Mail"')
