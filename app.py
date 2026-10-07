@@ -40,91 +40,46 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """Uses Gmail X-GM-LABELS and All Mail to reliably fetch labeled emails."""
+    def fetch_sailing_emails_fast():
+    """Connect to Gmail and diagnose available IMAP folders."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
-        mail_ids = []
-        selected_box = None
-                # TEMPORARY DIAGNOSTIC: show Gmail's actual IMAP folders
+        st.success("✅ Gmail login successful")
+
+        # Ask Gmail for the actual IMAP folders/labels
         status, folders = mail.list()
 
-        if status == "OK":
-            st.write("🔎 Gmail IMAP folders detected:")
-
-            for folder in folders:
-                st.code(str(folder))
-
-        # Method 1: Search by Gmail Native Label in All Mail
-                # Search the Gmail label directly
-        label_names = [
-            '"AA Shipping/CLDN"',
-            "AA Shipping/CLDN",
-        ]
-
-        for lbl in label_names:
-            status, _ = mail.select(lbl)
-
-            if status == "OK":
-                selected_box = lbl
-                status, data = mail.search(None, "ALL")
-
-                if status == "OK" and data[0]:
-                    mail_ids = data[0].split()
-                    break
-
-        if not mail_ids:
+        if status != "OK":
+            st.error(f"❌ Gmail connected, but folder list failed: {status}")
             mail.logout()
-            st.warning(
-                "⚠️ No emails found using label search. "
-                "Trying fallback search..."
-            )
             return {}
 
-        # Fetch up to 20 most recent messages
-        recent_ids = list(reversed(mail_ids[-20:]))
-        email_options = {}
+        st.subheader("🔎 Gmail IMAP folders detected")
 
-        for eid in recent_ids:
-            fetch_cmd = "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])"
-
-            if "All Mail" in str(selected_box):
-                status, data = mail.uid("fetch", eid, fetch_cmd)
+        for folder in folders:
+            if isinstance(folder, bytes):
+                folder_text = folder.decode(errors="replace")
             else:
-                status, data = mail.fetch(eid, fetch_cmd)
+                folder_text = str(folder)
 
-            if not data or not data[0]:
-                continue
-
-            # Extract headers cleanly
-            header_bytes = (
-                data[0][1]
-                if isinstance(data[0], tuple)
-                else data[1]
-            )
-
-            msg = email.message_from_bytes(header_bytes)
-
-            subject = msg.get("Subject", "No Subject")
-            raw_date = msg.get("Date", "")
-
-            formatted_date = format_to_gmt(raw_date)
-            label_text = f"{subject} — ({formatted_date})"
-
-            email_options[label_text] = (eid, selected_box)
+            st.code(folder_text)
 
         mail.logout()
-        return email_options
+
+        st.info(
+            "Diagnostic complete. Send me the folder list shown above."
+        )
+
+        return {}
 
     except Exception as e:
         st.error(
-            f"⚠️ Connection error: {type(e).__name__}: {e}. "
-            "Use the 'Paste Raw Email Text/HTML' tab to run "
-            "reconciliation manually!"
+            f"❌ Gmail connection error: "
+            f"{type(e).__name__}: {e}"
         )
         return {}
-
 
 def fetch_email_body_fast(email_info):
     """Fetches full HTML email body by UID/ID."""
