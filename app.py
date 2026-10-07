@@ -459,22 +459,19 @@ if uploaded_file and (
     selected_email_info
     or pasted_email_content
 ):
-
     if st.button(
         "🚀 Run Reconciliation",
         type="primary",
-        use_container_width=True,
-    ):
+        use_container_width=True,):
 
         with st.spinner(
-            "Processing reconciliation..."
-        ):
+            "Processing reconciliation..."):
+                
                if pasted_email_content.strip():
     email_body = pasted_email_content
 else:
     email_body = fetch_email_body_fast(
-        selected_email_info
-    )
+        selected_email_info)
 
 st.write("Email body length:", len(email_body))
 st.code(email_body[:5000])
