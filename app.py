@@ -359,7 +359,6 @@ input_tab1, input_tab2 = st.tabs(
 selected_email_info = None
 pasted_email_content = ""
 
-
 # ============================================================
 # GMAIL TAB
 # ============================================================
@@ -372,18 +371,16 @@ with input_tab1:
     if "selected_email" not in st.session_state:
         st.session_state.selected_email = None
 
-    c1, c2 = st.columns(
-        [3, 1]
-    )
+    c1, c2 = st.columns([3, 1])
 
     with c1:
 
         if st.session_state.email_options is None:
 
-           if st.button("📩 Load Sailing Confirmations"):
+            if st.button("📩 Load Sailing Confirmations"):
 
                 with st.spinner(
-                    "Connecting to Gmail..."
+                    "Loading Sailing Confirmations..."
                 ):
 
                     st.session_state.email_options = (
@@ -397,35 +394,37 @@ with input_tab1:
             )
 
             selected_email = st.selectbox(
-                "Select sailing email",
+                "Select Sailing Confirmation",
                 email_keys,
                 format_func=lambda x: (
-                    st.session_state.email_options[x][
-                        "subject"
-                    ]
+                    st.session_state.email_options[x]["subject"]
                     + " — "
-                    + st.session_state.email_options[x][
-                        "date"
-                    ]
+                    + st.session_state.email_options[x]["date"]
                 ),
             )
 
+            # Store the selected email so the
+            # reconciliation section can use it.
             st.session_state.selected_email = (
                 selected_email
             )
 
+            # IMPORTANT:
+            # This is the value used by the
+            # reconciliation section below.
+            selected_email_info = selected_email
+
         else:
 
             st.warning(
-                "No emails found in "
-                "'AA Shipping/CLDN'."
+                "No emails with the subject "
+                "'Sailing Confirmation' were found "
+                "in AA Shipping/CLDN."
             )
 
     with c2:
 
-        if st.button(
-            "🔄 Reset"
-        ):
+        if st.button("🔄 Reset"):
 
             st.session_state.email_options = None
             st.session_state.selected_email = None
