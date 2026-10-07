@@ -49,32 +49,22 @@ def fetch_sailing_emails_fast():
         selected_box = None
 
         # Method 1: Search by Gmail Native Label in All Mail
-        status, _ = mail.select('"[Gmail]/All Mail"')
-        if status == "OK":
-            selected_box = '"[Gmail]/All Mail"'
+                # Search the Gmail label directly
+        label_names = [
+            '"AA Shipping/CLDN"',
+            "AA Shipping/CLDN",
+        ]
 
-            # Search Gmail label X-GM-LABELS
-            status, data = mail.uid(
-                "search",
-                None,
-                f'X-GM-LABELS "{GMAIL_LABEL}"'
-            )
+        for lbl in label_names:
+            status, _ = mail.select(lbl)
 
-            if status == "OK" and data[0]:
-                mail_ids = data[0].split()
+            if status == "OK":
+                selected_box = lbl
+                status, data = mail.search(None, "ALL")
 
-        # Method 2: Fallback to direct label selection
-        if not mail_ids:
-            for lbl in [f'"{GMAIL_LABEL}"', GMAIL_LABEL, "INBOX"]:
-                status, _ = mail.select(lbl)
-
-                if status == "OK":
-                    selected_box = lbl
-                    status, data = mail.search(None, "ALL")
-
-                    if status == "OK" and data[0]:
-                        mail_ids = data[0].split()
-                        break
+                if status == "OK" and data[0]:
+                    mail_ids = data[0].split()
+                    break
 
         if not mail_ids:
             mail.logout()
