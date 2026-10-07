@@ -19,10 +19,10 @@ st.write(
 )
 
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("lhhv cwyd tcjd pzkg")
+GMAIL_APP_PASS = st.secrets.get("lhhv cwyd tcjd pzkg", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
-socket.setdefaulttimeout(6.0)
+socket.setdefaulttimeout(4.0)
 
 TRAILER_REGEX = r"\b(?:GTC\d{3}|GTUK\d{2})\b"
 
