@@ -43,7 +43,11 @@ def fetch_sailing_emails_fast():
     """Uses Gmail X-GM-LABELS and All Mail to reliably fetch labeled emails."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
-        mail.login(GMAIL_USER, GMAIL_APP_PASS)
+        try:
+    mail.login(GMAIL_USER, GMAIL_APP_PASS)
+except Exception as e:
+    st.error(f"❌ Gmail login failed: {type(e).__name__}: {e}")
+    return {}
 
         mail_ids = []
         selected_box = None
