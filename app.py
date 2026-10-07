@@ -19,7 +19,7 @@ st.write(
 )
 
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "bshg mcwd kahp xpqa")
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 socket.setdefaulttimeout(4.0)
@@ -391,7 +391,6 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                 # Summary Metrics
                 st.divider()
                 st.subheader("📊 Summary Metrics")
-                c1, c2, c3, c4 = st.columns(4)
 
                 matched_cnt = sum(
                     1 for r in results_data if "Matched" in r["Sailing Status"]
@@ -415,7 +414,15 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     or "⚠️" in r["Booking Ref"]
                 )
 
+                # Top Metric: Total Shipped
+                total_shipped = matched_cnt + forward_cnt
+                st.metric("🚢 Total Trailers Shipped", total_shipped)
+
+                st.write("") # Spacing
+
+                # Detailed Metrics Breakdown
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Matched Trailers", matched_cnt)
-                c2.metric("Left Behind", left_cnt)
-                c3.metric("Forward Shipped", forward_cnt)
+                c2.metric("Forward Shipped", forward_cnt)
+                c3.metric("Left Behind", left_cnt)
                 c4.metric("Flagged / Swapped", flagged_cnt)
