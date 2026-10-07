@@ -42,10 +42,12 @@ def format_to_gmt(raw_date_str):
 def fetch_sailing_emails_fast():
     """Uses Gmail X-GM-LABELS and All Mail to reliably fetch labeled emails."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
-
 try:
+    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
     mail.login(GMAIL_USER, GMAIL_APP_PASS)
+
+    mail_ids = []
+    selected_box = None
 except Exception as e:
     st.error(f"❌ Gmail login failed: {type(e).__name__}: {e}")
     return {}
