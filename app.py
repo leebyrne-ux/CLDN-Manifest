@@ -57,7 +57,7 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """Connect to Gmail and load recent emails from AA Shipping/CLDN."""
+    """Load recent Sailing Confirmation emails from AA Shipping/CLDN."""
 
     try:
         mail = imaplib.IMAP4_SSL(
@@ -70,31 +70,30 @@ def fetch_sailing_emails_fast():
             GMAIL_APP_PASS,
         )
 
-        st.success("✅ Gmail login successful")
-
-        # Gmail has confirmed this exact IMAP folder exists.
+        # Exact Gmail IMAP folder confirmed by diagnostics.
         folder = '"AA Shipping/CLDN"'
 
         status, data = mail.select(folder)
 
         if status != "OK":
             st.error(
-                f"❌ Could not open Gmail folder "
-                f"'AA Shipping/CLDN': {data}"
+                "❌ Could not open Gmail folder "
+                "'AA Shipping/CLDN'."
             )
             mail.logout()
             return {}
 
-        # Search all messages in the CLdN folder.
+        # Search for emails with "Sailing Confirmation"
+        # in the subject.
         status, messages = mail.uid(
             "search",
             None,
-            "ALL",
+            'SUBJECT "Sailing Confirmation"',
         )
 
         if status != "OK":
             st.error(
-                f"❌ Gmail search failed: {messages}"
+                "❌ Gmail search failed."
             )
             mail.logout()
             return {}
@@ -102,15 +101,11 @@ def fetch_sailing_emails_fast():
         message_ids = messages[0].split()
 
         if not message_ids:
-            st.warning(
-                "⚠️ The AA Shipping/CLDN folder is visible "
-                "to IMAP, but contains no messages."
-            )
             mail.logout()
             return {}
 
-        # Only inspect the 20 most recent messages.
-        recent_ids = message_ids[-20:]
+        # Look at the most recent 30 matching emails.
+        recent_ids = message_ids[-30:]
 
         email_options = {}
 
@@ -128,6 +123,7 @@ def fetch_sailing_emails_fast():
             raw_header = None
 
             for item in data:
+
                 if (
                     isinstance(item, tuple)
                     and len(item) > 1
@@ -148,6 +144,11 @@ def fetch_sailing_emails_fast():
                 "(No Subject)",
             )
 
+            # Extra safety check in case Gmail's search
+            # returns something unexpected.
+            if "sailing confirmation" not in subject.lower():
+                continue
+
             date_raw = msg.get(
                 "Date",
                 "",
@@ -165,17 +166,6 @@ def fetch_sailing_emails_fast():
             }
 
         mail.logout()
-
-        if email_options:
-            st.success(
-                f"✅ Found {len(email_options)} recent "
-                f"email(s) in AA Shipping/CLDN."
-            )
-        else:
-            st.warning(
-                "⚠️ No readable emails were found "
-                "in AA Shipping/CLDN."
-            )
 
         return email_options
 
