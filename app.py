@@ -1,4 +1,3 @@
-```python
 import email
 import email.utils
 import html
@@ -1309,4 +1308,3 @@ if uploaded_file and (
                         "Flagged / Swapped",
                         flagged_cnt,
                     )
-```
