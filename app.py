@@ -22,7 +22,7 @@ GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
 GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
-socket.setdefaulttimeout(4.0)
+socket.setdefaulttimeout(6.0)
 
 # Precise pattern for GTC (3 digits) and GTUK (2 digits)
 TRAILER_REGEX = r"\b(?:GTC\d{3}|GTUK\d{2})\b"
@@ -42,13 +42,14 @@ def format_to_gmt(raw_date_str):
 
 def fetch_sailing_emails_fast():
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=6)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
         status, _ = mail.select(f'"{GMAIL_LABEL}"')
         if status != "OK":
             status, _ = mail.select("INBOX")
             if status != "OK":
+                st.error(f"❌ Could not select folder '{GMAIL_LABEL}' or 'INBOX'")
                 return {}
 
         status, data = mail.search(None, "ALL")
@@ -58,7 +59,8 @@ def fetch_sailing_emails_fast():
             mail.logout()
             return {}
 
-        recent_ids = list(reversed(mail_ids[-15:]))
+        # Scan up to the last 50 emails
+        recent_ids = list(reversed(mail_ids[-50:]))
         email_options = {}
 
         for eid in recent_ids:
@@ -71,7 +73,9 @@ def fetch_sailing_emails_fast():
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
 
-            if "sailing confirmation" in subject.lower():
+            # Flexible subject match for sailing/manifest emails
+            subj_lower = subject.lower()
+            if any(term in subj_lower for term in ["sailing", "manifest", "confirmation", "cldn"]):
                 formatted_date = format_to_gmt(raw_date)
                 label_text = f"{subject} — ({formatted_date})"
                 email_options[label_text] = eid
@@ -80,7 +84,7 @@ def fetch_sailing_emails_fast():
         return email_options
     except Exception as e:
         st.error(
-            f"⚠️ Could not connect to Gmail IMAP automatically: {e}. You can paste the email text below!"
+            f"⚠️ Could not connect to Gmail IMAP automatically: {e}. Use the 'Paste Raw Email Text/HTML' tab instead!"
         )
         return {}
 
@@ -88,7 +92,7 @@ def fetch_sailing_emails_fast():
 def fetch_email_body_fast(email_id):
     """Fetches HTML body specifically to preserve email table structures."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=6)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
         mail.select(f'"{GMAIL_LABEL}"')
 
@@ -177,7 +181,7 @@ with input_tab1:
             )
             selected_email_id = st.session_state.email_options[selected_label]
         else:
-            st.warning("No 'Sailing Confirmation' emails found.")
+            st.warning("No matching emails found in the folder.")
 
     with c2:
         if st.session_state.email_options is not None:
@@ -242,187 +246,3 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                 trailer_row_data = {}  # CLEAN_TRAILER -> Set of clean row tokens
 
                 rows = soup.find_all("tr")
-                for tr in rows:
-                    cells = tr.find_all(["td", "th"])
-                    if not cells:
-                        continue
-
-                    raw_cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
-                    cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
-                    row_combined = " ".join(cleaned_tokens)
-
-                    # Match strict GTC and GTUK Trailer IDs in row
-                    gt_matches = re.findall(TRAILER_REGEX, row_combined, re.IGNORECASE)
-                    for m in gt_matches:
-                        clean_gt = clean_val(m)
-                        cldn_units.add(clean_gt)
-
-                        if clean_gt not in trailer_row_data:
-                            trailer_row_data[clean_gt] = set()
-                        
-                        trailer_row_data[clean_gt].update(cleaned_tokens)
-
-                # Fallback for non-HTML plain text emails
-                if not cldn_units:
-                    for line in email_body.splitlines():
-                        c_line = clean_val(line)
-                        matches = re.findall(TRAILER_REGEX, c_line, re.IGNORECASE)
-                        for m in matches:
-                            clean_gt = clean_val(m)
-                            cldn_units.add(clean_gt)
-                            if clean_gt not in trailer_row_data:
-                                trailer_row_data[clean_gt] = set()
-                            trailer_row_data[clean_gt].add(c_line)
-
-                full_email_clean = clean_val(soup.get_text())
-
-                st.subheader("📋 Reconciliation Results")
-
-                results_data = []
-
-                for idx, row in df.iterrows():
-                    raw_trailer = (
-                        str(row[trailer_col])
-                        if trailer_col and pd.notna(row[trailer_col])
-                        else ""
-                    )
-                    trailer_match = re.search(
-                        TRAILER_REGEX, raw_trailer, re.IGNORECASE
-                    )
-                    clean_trailer = (
-                        clean_val(trailer_match.group(0))
-                        if trailer_match
-                        else clean_val(raw_trailer)
-                    )
-
-                    if not clean_trailer:
-                        continue
-
-                    # 1. Sailing Status
-                    in_email = clean_trailer in cldn_units
-                    status = (
-                        "Matched 🟢"
-                        if in_email
-                        else "Not Present (Left Behind) 🔴"
-                    )
-
-                    # 2. Strict Instructions Check (Trailer Match Only)
-                    raw_instr = (
-                        str(row[instr_col]).strip()
-                        if instr_col and pd.notna(row[instr_col])
-                        else ""
-                    )
-                    instr_trailer_match = re.search(
-                        TRAILER_REGEX, raw_instr, re.IGNORECASE
-                    )
-                    instr_trailer_clean = (
-                        clean_val(instr_trailer_match.group(0))
-                        if instr_trailer_match
-                        else ""
-                    )
-
-                    if instr_trailer_clean and instr_trailer_clean != clean_trailer:
-                        instr_status = f"⚠️ Mismatch: {instr_trailer_clean} (Expected {clean_trailer})"
-                    else:
-                        instr_status = "Clean 🟢"
-
-                    # 3. Reference Row Validator
-                    row_tokens = trailer_row_data.get(clean_trailer, set())
-
-                    def verify_ref(ref_val):
-                        c_ref = clean_val(ref_val)
-                        if not c_ref:
-                            return "-"
-
-                        if any(c_ref in tok or tok in c_ref for tok in row_tokens):
-                            return f"{ref_val} 🟢 Matched"
-                        elif c_ref in full_email_clean:
-                            return f"{ref_val} ⚠️ Mismatch"
-                        else:
-                            return f"{ref_val} 🔴 Missing"
-
-                    raw_gmr = (
-                        str(row[gmr_col])
-                        if gmr_col and pd.notna(row[gmr_col])
-                        else ""
-                    )
-                    raw_pbn = (
-                        str(row[pbn_col])
-                        if pbn_col and pd.notna(row[pbn_col])
-                        else ""
-                    )
-                    raw_booking = (
-                        str(row[booking_col])
-                        if booking_col and pd.notna(row[booking_col])
-                        else ""
-                    )
-
-                    results_data.append(
-                        {
-                            "Trailer ID": clean_trailer,
-                            "Sailing Status": status,
-                            "Instructions Check": instr_status,
-                            "GMR Ref": verify_ref(raw_gmr),
-                            "PBN Ref": verify_ref(raw_pbn),
-                            "Booking Ref": verify_ref(raw_booking),
-                        }
-                    )
-
-                # Forward Shipped Units
-                qargo_found_units = set(r["Trailer ID"] for r in results_data)
-                forward_shipped = cldn_units - qargo_found_units
-
-                for f_unit in sorted(list(forward_shipped)):
-                    results_data.append(
-                        {
-                            "Trailer ID": f_unit,
-                            "Sailing Status": "Forward Shipped 🔵",
-                            "Instructions Check": "-",
-                            "GMR Ref": "-",
-                            "PBN Ref": "-",
-                            "Booking Ref": "-",
-                        }
-                    )
-
-                # Render Table
-                results_df = pd.DataFrame(results_data)
-                st.dataframe(results_df, use_container_width=True, hide_index=True)
-
-                # Summary Metrics
-                st.divider()
-                st.subheader("📊 Summary Metrics")
-
-                matched_cnt = sum(
-                    1 for r in results_data if "Matched" in r["Sailing Status"]
-                )
-                left_cnt = sum(
-                    1
-                    for r in results_data
-                    if "Left Behind" in r["Sailing Status"]
-                )
-                forward_cnt = sum(
-                    1
-                    for r in results_data
-                    if "Forward Shipped" in r["Sailing Status"]
-                )
-                flagged_cnt = sum(
-                    1
-                    for r in results_data
-                    if "⚠️" in r["Instructions Check"]
-                    or "⚠️" in r["PBN Ref"]
-                    or "⚠️" in r["GMR Ref"]
-                    or "⚠️" in r["Booking Ref"]
-                )
-
-                # Top Metric: Total Shipped
-                total_shipped = matched_cnt + forward_cnt
-                st.metric("🚢 Total Trailers Shipped", total_shipped)
-
-                st.write("") # Spacing
-
-                # Detailed Metrics Breakdown
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Matched Trailers", matched_cnt)
-                c2.metric("Forward Shipped", forward_cnt)
-                c3.metric("Left Behind", left_cnt)
-                c4.metric("Flagged / Swapped", flagged_cnt)
