@@ -22,8 +22,9 @@ GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
 GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
-socket.setdefaulttimeout(6.0)
+socket.setdefaulttimeout(4.0)
 
+# Precise pattern for GTC (3 digits) and GTUK (2 digits)
 TRAILER_REGEX = r"\b(?:GTC\d{3}|GTUK\d{2})\b"
 
 
@@ -40,20 +41,15 @@ def format_to_gmt(raw_date_str):
 
 
 def fetch_sailing_emails_fast():
-    """Fetches the last 20 emails cleanly without overly strict subject filtering."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=6)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
 
-        # Try specific label first, fallback to INBOX if needed
         status, _ = mail.select(f'"{GMAIL_LABEL}"')
         if status != "OK":
-            status, _ = mail.select(GMAIL_LABEL)
+            status, _ = mail.select("INBOX")
             if status != "OK":
-                status, _ = mail.select("INBOX")
-                if status != "OK":
-                    st.error("❌ Could not open specified label or INBOX.")
-                    return {}
+                return {}
 
         status, data = mail.search(None, "ALL")
         mail_ids = data[0].split()
@@ -62,8 +58,7 @@ def fetch_sailing_emails_fast():
             mail.logout()
             return {}
 
-        # Fetch last 20 emails
-        recent_ids = list(reversed(mail_ids[-20:]))
+        recent_ids = list(reversed(mail_ids[-15:]))
         email_options = {}
 
         for eid in recent_ids:
@@ -76,15 +71,16 @@ def fetch_sailing_emails_fast():
             subject = msg.get("Subject", "No Subject")
             raw_date = msg.get("Date", "")
 
-            formatted_date = format_to_gmt(raw_date)
-            label_text = f"{subject} — ({formatted_date})"
-            email_options[label_text] = eid
+            if "sailing confirmation" in subject.lower():
+                formatted_date = format_to_gmt(raw_date)
+                label_text = f"{subject} — ({formatted_date})"
+                email_options[label_text] = eid
 
         mail.logout()
         return email_options
     except Exception as e:
         st.error(
-            f"⚠️ Could not connect to Gmail IMAP automatically: {e}. Use the 'Paste Raw Email Text/HTML' tab instead!"
+            f"⚠️ Could not connect to Gmail IMAP automatically: {e}. You can paste the email text below!"
         )
         return {}
 
@@ -92,12 +88,9 @@ def fetch_sailing_emails_fast():
 def fetch_email_body_fast(email_id):
     """Fetches HTML body specifically to preserve email table structures."""
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=6)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=4)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
-
-        status, _ = mail.select(f'"{GMAIL_LABEL}"')
-        if status != "OK":
-            mail.select("INBOX")
+        mail.select(f'"{GMAIL_LABEL}"')
 
         status, data = mail.fetch(email_id, "(RFC822)")
         raw_email = data[0][1]
@@ -184,7 +177,7 @@ with input_tab1:
             )
             selected_email_id = st.session_state.email_options[selected_label]
         else:
-            st.warning("No emails found in folder or INBOX.")
+            st.warning("No 'Sailing Confirmation' emails found.")
 
     with c2:
         if st.session_state.email_options is not None:
@@ -246,7 +239,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                 soup = BeautifulSoup(email_body, "html.parser")
 
                 cldn_units = set()
-                trailer_row_data = {}
+                trailer_row_data = {}  # CLEAN_TRAILER -> Set of clean row tokens
 
                 rows = soup.find_all("tr")
                 for tr in rows:
@@ -258,6 +251,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     cleaned_tokens = [clean_val(c) for c in raw_cell_texts if clean_val(c)]
                     row_combined = " ".join(cleaned_tokens)
 
+                    # Match strict GTC and GTUK Trailer IDs in row
                     gt_matches = re.findall(TRAILER_REGEX, row_combined, re.IGNORECASE)
                     for m in gt_matches:
                         clean_gt = clean_val(m)
@@ -268,6 +262,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                         
                         trailer_row_data[clean_gt].update(cleaned_tokens)
 
+                # Fallback for non-HTML plain text emails
                 if not cldn_units:
                     for line in email_body.splitlines():
                         c_line = clean_val(line)
@@ -396,6 +391,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                 # Summary Metrics
                 st.divider()
                 st.subheader("📊 Summary Metrics")
+                c1, c2, c3, c4 = st.columns(4)
 
                 matched_cnt = sum(
                     1 for r in results_data if "Matched" in r["Sailing Status"]
@@ -419,15 +415,7 @@ if uploaded_file and (selected_email_id or pasted_email_content):
                     or "⚠️" in r["Booking Ref"]
                 )
 
-                # Top Metric: Total Shipped
-                total_shipped = matched_cnt + forward_cnt
-                st.metric("🚢 Total Trailers Shipped", total_shipped)
-
-                st.write("")
-
-                # Detailed Metrics Breakdown
-                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Matched Trailers", matched_cnt)
-                c2.metric("Forward Shipped", forward_cnt)
-                c3.metric("Left Behind", left_cnt)
+                c2.metric("Left Behind", left_cnt)
+                c3.metric("Forward Shipped", forward_cnt)
                 c4.metric("Flagged / Swapped", flagged_cnt)
