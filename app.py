@@ -380,9 +380,7 @@ with input_tab1:
 
         if st.session_state.email_options is None:
 
-            if st.button(
-                "🔌 Connect & Load Recent Emails"
-            ):
+           if st.button("📩 Load Sailing Confirmations"):
 
                 with st.spinner(
                     "Connecting to Gmail..."
