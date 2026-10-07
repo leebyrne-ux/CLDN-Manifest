@@ -19,7 +19,7 @@ st.write(
 )
 
 GMAIL_USER = st.secrets.get("GMAIL_USER", "lee.byrne@gogginstransport.ie")
-GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
+GMAIL_APP_PASS = st.secrets.get("lhhv cwyd tcjd pzkg", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
 
 socket.setdefaulttimeout(6.0)
