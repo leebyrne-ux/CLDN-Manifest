@@ -1,18 +1,20 @@
 import email
+import email.header
 import email.utils
 import html
 import imaplib
 import re
 import socket
-import zoneinfo
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
-from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
+from bs4 import BeautifulSoup
 
 
 # ============================================================
-# PAGE SETUP
+# PAGE SETUP AND SETTINGS
 # ============================================================
 
 st.set_page_config(
@@ -22,1289 +24,673 @@ st.set_page_config(
 )
 
 st.title("🚢 CLdN Manifest Reconciliation")
-
 st.write(
-    "Upload your Qargo export file (.csv or .xlsx) to reconcile trailers, "
-    "instructions, GMR, PBN, and Booking Refs against CLdN sailing emails."
+    "Upload a Qargo export. The app will identify the CLdN Sailing "
+    "Confirmation using the intermodal departure date and route, then "
+    "check trailers, instructions, GMR, PBN and booking references."
 )
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
 
 GMAIL_USER = st.secrets.get(
-    "GMAIL_USER",
-    "lee.byrne@gogginstransport.ie",
+    "GMAIL_USER", "lee.byrne@gogginstransport.ie"
 )
-
-GMAIL_APP_PASS = st.secrets.get(
-    "GMAIL_APP_PASS",
-    "",
-)
-
+GMAIL_APP_PASS = st.secrets.get("GMAIL_APP_PASS", "")
 GMAIL_LABEL = "AA Shipping/CLDN"
-
-socket.setdefaulttimeout(8.0)
+IMAP_HOST = "imap.gmail.com"
+IMAP_TIMEOUT = 12
+socket.setdefaulttimeout(IMAP_TIMEOUT)
 
 TRAILER_REGEX = r"\b(?:GTC\d{3}|GTUK\d{2})\b"
+DIRECTION_MAP = {
+    "DUB": ("DUBLIN", "LIVERPOOL"),
+    "LIV": ("LIVERPOOL", "DUBLIN"),
+}
+DUBLIN_TZ = ZoneInfo("Europe/Dublin")
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
-def format_to_gmt(raw_date_str):
-    if not raw_date_str:
-        return "Unknown Date"
+def decode_header_value(value):
+    """Decode MIME-encoded header text into readable text."""
+    if not value:
+        return ""
+    chunks = email.header.decode_header(value)
+    result = []
+    for chunk, charset in chunks:
+        if isinstance(chunk, bytes):
+            try:
+                result.append(chunk.decode(charset or "utf-8", errors="replace"))
+            except LookupError:
+                result.append(chunk.decode("utf-8", errors="replace"))
+        else:
+            result.append(str(chunk))
+    return "".join(result)
 
+
+def clean_val(value):
+    if value is None:
+        return ""
     try:
-        dt_utc = email.utils.parsedate_to_datetime(
-            raw_date_str
-        )
-
-        local_tz = zoneinfo.ZoneInfo(
-            "Europe/Dublin"
-        )
-
-        dt_local = dt_utc.astimezone(
-            local_tz
-        )
-
-        return dt_local.strftime(
-            "%a, %d %b %Y %H:%M:%S %Z"
-        )
-
-    except Exception:
-        return raw_date_str
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = html.unescape(str(value)).replace("\xa0", " ").strip()
+    if text.lower() in {"", "nan", "none", "nat"}:
+        return ""
+    return re.sub(r"[^\w]", "", text).upper()
 
 
 def find_column(df, search_terms):
-
-    for col in df.columns:
-
-        col_clean = str(col).strip().lower()
-
-        for term in search_terms:
-
-            if term.lower() in col_clean:
+    lowered = [(col, str(col).strip().lower()) for col in df.columns]
+    # Prefer exact or more-specific matches first.
+    for term in search_terms:
+        for col, name in lowered:
+            if name == term.lower():
                 return col
-
+    for term in search_terms:
+        for col, name in lowered:
+            if term.lower() in name:
+                return col
     return None
 
 
-def clean_val(val):
+def as_date(value):
+    """Convert common Excel/Qargo date values to a date, or None."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
 
-    if (
-        not val
-        or pd.isna(val)
-        or str(val).lower() == "nan"
-    ):
-        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "nat", "none"}:
+        return None
 
-    text = html.unescape(
-        str(val)
-    ).replace(
-        "\xa0",
-        " ",
+    # First let pandas handle normal exported date/time formats.
+    try:
+        parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.date()
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # Excel serial dates occasionally arrive as strings.
+    try:
+        number = float(text)
+        if 20000 < number < 80000:
+            return (pd.Timestamp("1899-12-30") + pd.to_timedelta(number, unit="D")).date()
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
+def direction_from_booking_refs(values):
+    prefixes = set()
+    examples = []
+    for value in values:
+        raw = str(value).strip().upper()
+        if not raw or raw in {"NAN", "NONE"}:
+            continue
+        match = re.search(r"\b(DUB|LIV)[A-Z0-9-]*", raw)
+        if match:
+            prefix = match.group(1)
+            prefixes.add(prefix)
+            examples.append(raw)
+    if not prefixes:
+        return None, examples
+    if len(prefixes) > 1:
+        return "CONFLICT", examples
+    return next(iter(prefixes)), examples
+
+
+def direction_text(prefix):
+    if prefix not in DIRECTION_MAP:
+        return "Unknown route"
+    origin, destination = DIRECTION_MAP[prefix]
+    return f"{origin.title()} → {destination.title()}"
+
+
+# ============================================================
+# GMAIL / MIME HELPERS
+# ============================================================
+
+def open_gmail_folder(mail):
+    """Select the configured label, trying common Gmail IMAP spellings."""
+    candidates = [
+        f'"{GMAIL_LABEL}"',
+        GMAIL_LABEL,
+        f'"[Gmail]/{GMAIL_LABEL}"',
+    ]
+    last_error = None
+    for folder in candidates:
+        try:
+            status, data = mail.select(folder, readonly=True)
+            if status == "OK":
+                return folder
+            last_error = data
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(
+        f"Could not open Gmail label '{GMAIL_LABEL}'. "
+        f"Check the label name and IMAP access. Details: {last_error}"
     )
 
-    return re.sub(
-        r"[^\w]",
-        "",
-        text,
-    ).upper()
+
+def extract_email_content(msg):
+    """Return best readable body text plus attachment filenames."""
+    html_parts = []
+    plain_parts = []
+    attachment_names = []
+
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        filename = decode_header_value(part.get_filename())
+        disposition = (part.get("Content-Disposition") or "").lower()
+        if filename:
+            attachment_names.append(filename)
+
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            content = payload.decode(charset, errors="replace")
+        except LookupError:
+            content = payload.decode("utf-8", errors="replace")
+
+        is_attachment = "attachment" in disposition or bool(filename)
+        content_type = part.get_content_type().lower()
+
+        if is_attachment:
+            lower_name = filename.lower()
+            if lower_name.endswith((".txt", ".csv", ".html", ".htm")):
+                if content_type == "text/html" or lower_name.endswith((".html", ".htm")):
+                    html_parts.append(content)
+                else:
+                    plain_parts.append(content)
+            continue
+
+        if content_type == "text/html":
+            html_parts.append(content)
+        elif content_type == "text/plain":
+            plain_parts.append(content)
+
+    if html_parts:
+        return "\n".join(html_parts), attachment_names
+    return "\n".join(plain_parts), attachment_names
 
 
-# ============================================================
-# GMAIL - LOAD SAILING CONFIRMATIONS
-# ============================================================
+def body_to_text(body):
+    if not body:
+        return ""
+    soup = BeautifulSoup(body, "html.parser")
+    return re.sub(r"[ \t]+", " ", soup.get_text("\n", strip=True)).replace("\xa0", " ")
 
-def fetch_sailing_emails_fast():
-    """Load recent Sailing Confirmation emails from AA Shipping/CLDN."""
 
+def fetch_recent_sailing_emails(limit=150):
+    """Fetch recent Sailing Confirmation messages from the configured label."""
+    if not GMAIL_APP_PASS:
+        raise RuntimeError(
+            "GMAIL_APP_PASS is missing from Streamlit secrets. "
+            "Add your Gmail app password in the app's Secrets settings."
+        )
+    mail = None
+    results = []
     try:
-
-        mail = imaplib.IMAP4_SSL(
-            "imap.gmail.com",
-            timeout=8,
-        )
-
-        mail.login(
-            GMAIL_USER,
-            GMAIL_APP_PASS,
-        )
-
-        folder = '"AA Shipping/CLDN"'
-
-        status, data = mail.select(
-            folder
-        )
-
+        mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
+        mail.login(GMAIL_USER, GMAIL_APP_PASS)
+        folder = open_gmail_folder(mail)
+        status, data = mail.uid("search", None, 'SUBJECT "Sailing Confirmation"')
         if status != "OK":
+            raise RuntimeError("Gmail search for Sailing Confirmation failed.")
 
-            st.error(
-                "❌ Could not open Gmail folder "
-                "'AA Shipping/CLDN'."
-            )
-
-            mail.logout()
-
-            return {}
-
-        status, messages = mail.uid(
-            "search",
-            None,
-            'SUBJECT "Sailing Confirmation"',
-        )
-
-        if status != "OK":
-
-            st.error(
-                "❌ Gmail search failed."
-            )
-
-            mail.logout()
-
-            return {}
-
-        message_ids = messages[0].split()
-
-        if not message_ids:
-
-            mail.logout()
-
-            return {}
-
-        recent_ids = message_ids[-30:]
-
-        email_options = {}
-
-        for email_id in reversed(
-            recent_ids
-        ):
-
-            status, data = mail.uid(
-                "fetch",
-                email_id,
-                (
-                    "(BODY.PEEK[HEADER.FIELDS "
-                    "(SUBJECT DATE FROM)])"
-                ),
-            )
-
+        ids = data[0].split() if data and data[0] else []
+        for message_id in reversed(ids[-limit:]):
+            status, data = mail.uid("fetch", message_id, "(RFC822)")
             if status != "OK" or not data:
                 continue
-
-            raw_header = None
-
-            for item in data:
-
-                if (
-                    isinstance(item, tuple)
-                    and len(item) > 1
-                    and isinstance(
-                        item[1],
-                        bytes,
-                    )
-                ):
-
-                    raw_header = item[1]
-
-                    break
-
-            if not raw_header:
-                continue
-
-            msg = email.message_from_bytes(
-                raw_header
-            )
-
-            subject = msg.get(
-                "Subject",
-                "(No Subject)",
-            )
-
-            if (
-                "sailing confirmation"
-                not in subject.lower()
-            ):
-                continue
-
-            date_raw = msg.get(
-                "Date",
-                "",
-            )
-
-            date_display = format_to_gmt(
-                date_raw
-            )
-
-            email_options[
+            raw_message = next(
                 (
-                    email_id.decode(),
-                    folder,
-                )
-            ] = {
-                "subject": subject,
-                "date": date_display,
+                    item[1] for item in data
+                    if isinstance(item, tuple)
+                    and len(item) > 1
+                    and isinstance(item[1], bytes)
+                ),
+                None,
+            )
+            if not raw_message:
+                continue
+            msg = email.message_from_bytes(raw_message)
+            subject = decode_header_value(msg.get("Subject", ""))
+            if "sailing confirmation" not in subject.lower():
+                continue
+            body, attachments = extract_email_content(msg)
+            text = body_to_text(body)
+            results.append(
+                {
+                    "id": message_id.decode(errors="ignore"),
+                    "folder": folder,
+                    "subject": subject,
+                    "date_header": msg.get("Date", ""),
+                    "body": body,
+                    "text": text,
+                    "attachments": attachments,
+                }
+            )
+        return results
+    finally:
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+def parse_sailing_details(email_item):
+    """Read route and scheduled sailing date/time, deliberately ignoring Departed."""
+    text = email_item.get("text") or body_to_text(email_item.get("body", ""))
+    upper = text.upper()
+
+    route_match = re.search(
+        r"\b(DUBLIN|LIVERPOOL)\s*(?:TO|→|->)\s*(DUBLIN|LIVERPOOL)\b",
+        upper,
+    )
+    route = None
+    if route_match:
+        origin, destination = route_match.group(1), route_match.group(2)
+        if origin != destination:
+            route = (origin, destination)
+
+    # CLdN confirmation format: Wednesday 14/10/2026 12:00.
+    # Only parse the first date/time in the body before the "Departed:" line.
+    before_departed = re.split(r"\bDEPARTED\s*:", upper, maxsplit=1)[0]
+    date_match = re.search(
+        r"\b(?:MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)?"
+        r"\s*(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s+(\d{1,2}):(\d{2})\b",
+        before_departed,
+    )
+    scheduled = None
+    if date_match:
+        day, month, year, hour, minute = map(int, date_match.groups())
+        try:
+            scheduled = datetime(year, month, day, hour, minute, tzinfo=DUBLIN_TZ)
+        except ValueError:
+            scheduled = None
+
+    # In the CLdN layout the vessel is usually the non-empty line immediately
+    # before the route line (e.g. MAZARINE before DUBLIN to LIVERPOOL).
+    vessel = ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if re.search(r"\b(DUBLIN|LIVERPOOL)\s+(?:TO|→|->)\s+(DUBLIN|LIVERPOOL)\b", line.upper()):
+            for previous in reversed(lines[:index]):
+                if previous.upper() not in {"CLDN", "SAILING CONFIRMATION", "GOGGINS TRANSPORT COMPANY"}:
+                    vessel = previous
+                    break
+            break
+    return {
+        "route": route,
+        "scheduled": scheduled,
+        "vessel": vessel,
+        "text": text,
+    }
+
+
+# ============================================================
+# QARGO DATA
+# ============================================================
+
+def read_qargo_file(uploaded_file):
+    filename = uploaded_file.name.lower()
+    if filename.endswith(".csv"):
+        try:
+            return pd.read_csv(uploaded_file)
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding_errors="replace")
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file)
+    raise ValueError("Please upload a CSV, XLSX or XLS file.")
+
+
+def identify_qargo_fields(df):
+    departure_col = find_column(
+        df,
+        ["intermodal departure", "intermodal departure date", "intermodal depart"],
+    )
+    booking_col = find_column(df, ["booking ref", "booking reference", "booking"])
+    trailer_col = find_column(df, ["trailers & instructions", "trailer"])
+    instr_col = find_column(df, ["instructions", "instruction", "notes"])
+    gmr_col = find_column(df, ["gmr"])
+    pbn_col = find_column(df, ["pbn"])
+
+    missing = []
+    if departure_col is None:
+        missing.append("Intermodal Departure")
+    if booking_col is None:
+        missing.append("Booking Ref")
+    if trailer_col is None:
+        missing.append("Trailer (or Trailers & Instructions)")
+    if missing:
+        raise ValueError(
+            "Could not identify these required Qargo columns: "
+            + ", ".join(missing)
+            + ". Please check the column headings in your export."
+        )
+    return {
+        "departure": departure_col,
+        "booking": booking_col,
+        "trailer": trailer_col,
+        "instructions": instr_col,
+        "gmr": gmr_col,
+        "pbn": pbn_col,
+    }
+
+
+def infer_qargo_sailing(df, columns):
+    departure_dates = set()
+    bad_departures = []
+    for value in df[columns["departure"]].tolist():
+        if str(value).strip() and str(value).strip().lower() not in {"nan", "nat", "none"}:
+            parsed = as_date(value)
+            if parsed:
+                departure_dates.add(parsed)
+            else:
+                bad_departures.append(str(value))
+
+    if not departure_dates:
+        raise ValueError(
+            "No usable dates were found in the Qargo 'Intermodal Departure' column."
+        )
+    if len(departure_dates) > 1:
+        shown = ", ".join(d.strftime("%d/%m/%Y") for d in sorted(departure_dates))
+        raise ValueError(
+            "The Qargo export contains more than one Intermodal Departure date "
+            f"({shown}). Please upload an export for one sailing only; the app "
+            "will not guess which sailing you intend to reconcile."
+        )
+
+    prefix, examples = direction_from_booking_refs(df[columns["booking"]].tolist())
+    if prefix == "CONFLICT":
+        raise ValueError(
+            "Booking references contain both DUB and LIV prefixes. "
+            "Please check that the export contains one sailing direction only."
+        )
+    if prefix is None:
+        raise ValueError(
+            "Could not infer the sailing direction from the Booking Ref column. "
+            "The app expects DUB-prefixed references for Dublin → Liverpool or "
+            "LIV-prefixed references for Liverpool → Dublin."
+        )
+
+    return next(iter(departure_dates)), prefix
+
+
+# ============================================================
+# RECONCILIATION LOGIC (preserves original checks)
+# ============================================================
+
+def reconcile(df, email_text, columns):
+    soup = BeautifulSoup(email_text, "html.parser")
+    visible_text = soup.get_text("\n", strip=True) if soup.find() else email_text
+    visible_text = html.unescape(visible_text).replace("\xa0", " ")
+    cldn_units = set()
+    trailer_row_data = {}
+
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if not cells:
+            continue
+        cell_texts = [
+            cell.get_text(separator=" ", strip=True) for cell in cells
+        ]
+        cleaned_tokens = [clean_val(cell) for cell in cell_texts if clean_val(cell)]
+        combined = " ".join(cleaned_tokens)
+        for match in re.findall(TRAILER_REGEX, combined, re.IGNORECASE):
+            trailer = clean_val(match)
+            cldn_units.add(trailer)
+            trailer_row_data.setdefault(trailer, set()).update(cleaned_tokens)
+
+    if not cldn_units:
+        for line in visible_text.splitlines():
+            cleaned_line = clean_val(line)
+            for match in re.findall(TRAILER_REGEX, cleaned_line, re.IGNORECASE):
+                trailer = clean_val(match)
+                cldn_units.add(trailer)
+                trailer_row_data.setdefault(trailer, set()).add(cleaned_line)
+
+    full_email_clean = clean_val(visible_text)
+    results = []
+
+    def value_from(row, column):
+        if column is None:
+            return ""
+        value = row[column]
+        return "" if pd.isna(value) else str(value).strip()
+
+    def verify_ref(ref_value, row_tokens):
+        clean_ref = clean_val(ref_value)
+        if not clean_ref:
+            return "-"
+        if any(clean_ref in token or token in clean_ref for token in row_tokens):
+            return f"{ref_value} 🟢 Matched"
+        if clean_ref in full_email_clean:
+            return f"{ref_value} ⚠️ Mismatch"
+        return f"{ref_value} 🔴 Missing"
+
+    for _, row in df.iterrows():
+        raw_trailer = value_from(row, columns["trailer"])
+        match = re.search(TRAILER_REGEX, raw_trailer, re.IGNORECASE)
+        trailer = clean_val(match.group(0)) if match else clean_val(raw_trailer)
+        if not trailer:
+            continue
+
+        in_email = trailer in cldn_units
+        sailing_status = (
+            "Matched 🟢" if in_email else "Not Present (Left Behind) 🔴"
+        )
+
+        raw_instructions = value_from(row, columns["instructions"])
+        instr_match = re.search(TRAILER_REGEX, raw_instructions, re.IGNORECASE)
+        instr_trailer = clean_val(instr_match.group(0)) if instr_match else ""
+        if instr_trailer and instr_trailer != trailer:
+            instructions_status = (
+                f"⚠️ Mismatch: {instr_trailer} (Expected {trailer})"
+            )
+        else:
+            instructions_status = "Clean 🟢"
+
+        row_tokens = trailer_row_data.get(trailer, set())
+        results.append(
+            {
+                "Trailer ID": trailer,
+                "Sailing Status": sailing_status,
+                "Instructions Check": instructions_status,
+                "GMR Ref": verify_ref(value_from(row, columns["gmr"]), row_tokens),
+                "PBN Ref": verify_ref(value_from(row, columns["pbn"]), row_tokens),
+                "Booking Ref": verify_ref(value_from(row, columns["booking"]), row_tokens),
             }
-
-        mail.logout()
-
-        return email_options
-
-    except Exception as e:
-
-        st.error(
-            f"❌ Gmail connection error: "
-            f"{type(e).__name__}: {e}"
         )
 
-        return {}
+    qargo_units = {item["Trailer ID"] for item in results}
+    for trailer in sorted(cldn_units - qargo_units):
+        results.append(
+            {
+                "Trailer ID": trailer,
+                "Sailing Status": "Forward Shipped 🔵",
+                "Instructions Check": "-",
+                "GMR Ref": "-",
+                "PBN Ref": "-",
+                "Booking Ref": "-",
+            }
+        )
+
+    return pd.DataFrame(results), len(cldn_units)
+
+
+def render_results(results_df, cldn_count):
+    st.subheader("📋 Reconciliation Results")
+    st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+    matched = int(results_df["Sailing Status"].str.contains("Matched", na=False).sum()) if not results_df.empty else 0
+    left = int(results_df["Sailing Status"].str.contains("Left Behind", na=False).sum()) if not results_df.empty else 0
+    forward = int(results_df["Sailing Status"].str.contains("Forward Shipped", na=False).sum()) if not results_df.empty else 0
+    flagged = 0
+    if not results_df.empty:
+        for column in ["Instructions Check", "GMR Ref", "PBN Ref", "Booking Ref"]:
+            flagged += int(results_df[column].astype(str).str.contains("⚠️|🔴", regex=True, na=False).sum())
+
+    st.divider()
+    st.subheader("📊 Summary Metrics")
+    st.metric("🚢 Total Trailers on Sailing Manifest", cldn_count)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Matched Trailers", matched)
+    c2.metric("Forward Shipped", forward)
+    c3.metric("Left Behind", left)
+    c4.metric("Flagged / Swapped Checks", flagged)
 
 
 # ============================================================
-# GMAIL - FETCH FULL EMAIL
-# ============================================================
-
-def fetch_email_body_fast(email_info):
-    """
-    Fetch the selected email.
-
-    Returns:
-        email_body, attachment_names
-    """
-
-    try:
-
-        if isinstance(
-            email_info,
-            tuple,
-        ):
-
-            email_id, folder = email_info
-
-        else:
-
-            email_id = email_info
-            folder = '"AA Shipping/CLDN"'
-
-        mail = imaplib.IMAP4_SSL(
-            "imap.gmail.com",
-            timeout=8,
-        )
-
-        mail.login(
-            GMAIL_USER,
-            GMAIL_APP_PASS,
-        )
-
-        status, data = mail.select(
-            folder
-        )
-
-        if status != "OK":
-
-            mail.logout()
-
-            return "", []
-
-        status, data = mail.uid(
-            "fetch",
-            email_id,
-            "(RFC822)",
-        )
-
-        if (
-            status != "OK"
-            or not data
-        ):
-
-            mail.logout()
-
-            return "", []
-
-        raw_email = None
-
-        for item in data:
-
-            if (
-                isinstance(item, tuple)
-                and len(item) > 1
-                and isinstance(
-                    item[1],
-                    bytes,
-                )
-            ):
-
-                raw_email = item[1]
-
-                break
-
-        if not raw_email:
-
-            mail.logout()
-
-            return "", []
-
-        msg = email.message_from_bytes(
-            raw_email
-        )
-
-        html_body = ""
-        plain_body = ""
-
-        attachment_names = []
-
-        if msg.is_multipart():
-
-            for part in msg.walk():
-
-                content_type = (
-                    part.get_content_type()
-                )
-
-                content_disposition = (
-                    part.get(
-                        "Content-Disposition",
-                        "",
-                    )
-                )
-
-                filename = part.get_filename()
-
-                if filename:
-
-                    attachment_names.append(
-                        filename
-                    )
-
-                payload = part.get_payload(
-                    decode=True
-                )
-
-                if not payload:
-                    continue
-
-                # Main email HTML
-                if (
-                    content_type
-                    == "text/html"
-                    and "attachment"
-                    not in content_disposition.lower()
-                ):
-
-                    html_body += (
-                        payload.decode(
-                            errors="ignore"
-                        )
-                        + "\n"
-                    )
-
-                # Main email plain text
-                elif (
-                    content_type
-                    == "text/plain"
-                    and "attachment"
-                    not in content_disposition.lower()
-                ):
-
-                    plain_body += (
-                        payload.decode(
-                            errors="ignore"
-                        )
-                        + "\n"
-                    )
-
-                # Useful text-based attachments
-                elif filename:
-
-                    lower_name = filename.lower()
-
-                    if lower_name.endswith(
-                        (
-                            ".txt",
-                            ".csv",
-                            ".html",
-                            ".htm",
-                        )
-                    ):
-
-                        try:
-
-                            attachment_text = (
-                                payload.decode(
-                                    errors="ignore"
-                                )
-                            )
-
-                            plain_body += (
-                                "\n"
-                                + attachment_text
-                                + "\n"
-                            )
-
-                        except Exception:
-                            pass
-
-        else:
-
-            payload = msg.get_payload(
-                decode=True
-            )
-
-            if payload:
-
-                if (
-                    msg.get_content_type()
-                    == "text/html"
-                ):
-
-                    html_body = payload.decode(
-                        errors="ignore"
-                    )
-
-                else:
-
-                    plain_body = payload.decode(
-                        errors="ignore"
-                    )
-
-        mail.logout()
-
-        if html_body.strip():
-
-            return (
-                html_body,
-                attachment_names,
-            )
-
-        return (
-            plain_body,
-            attachment_names,
-        )
-
-    except Exception as e:
-
-        st.error(
-            f"❌ Error fetching email content: {e}"
-        )
-
-        return "", []
-
-
-# ============================================================
-# 1. FILE UPLOAD
+# MAIN APP — UPLOAD, AUTO-MATCH, RECONCILE
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "1️⃣ Drop Qargo Export File (.csv, .xlsx, or .xls)",
-    type=[
-        "csv",
-        "xlsx",
-        "xls",
-    ],
+    "Upload Qargo Export (.csv, .xlsx or .xls)",
+    type=["csv", "xlsx", "xls"],
 )
 
-st.divider()
-
-
-# ============================================================
-# 2. EMAIL INPUT
-# ============================================================
-
-st.subheader(
-    "2️⃣ Select or Paste CLdN Manifest Email"
-)
-
-input_tab1, input_tab2 = st.tabs(
-    [
-        "📩 Fetch via Gmail IMAP",
-        "📋 Paste Raw Email Text/HTML",
-    ]
-)
-
-selected_email_info = None
-pasted_email_content = ""
-
-
-# ============================================================
-# GMAIL TAB
-# ============================================================
-
-with input_tab1:
-
-    if "email_options" not in st.session_state:
-        st.session_state.email_options = None
-
-    if "selected_email" not in st.session_state:
-        st.session_state.selected_email = None
-
-    c1, c2 = st.columns(
-        [3, 1]
-    )
-
-    with c1:
-
-        if (
-            st.session_state.email_options
-            is None
-        ):
-
-            if st.button(
-                "📩 Load Sailing Confirmations"
-            ):
-
-                with st.spinner(
-                    "Loading Sailing Confirmations..."
-                ):
-
-                    st.session_state.email_options = (
-                        fetch_sailing_emails_fast()
-                    )
-
-        elif st.session_state.email_options:
-
-            email_keys = list(
-                st.session_state.email_options.keys()
-            )
-
-            selected_email = st.selectbox(
-                "Select Sailing Confirmation",
-                email_keys,
-                format_func=lambda x: (
-                    st.session_state.email_options[x][
-                        "subject"
-                    ]
-                    + " — "
-                    + st.session_state.email_options[x][
-                        "date"
-                    ]
-                ),
-            )
-
-            st.session_state.selected_email = (
-                selected_email
-            )
-
-            selected_email_info = (
-                selected_email
-            )
-
-        else:
-
-            st.warning(
-                "No emails with the subject "
-                "'Sailing Confirmation' were found "
-                "in AA Shipping/CLDN."
-            )
-
-    with c2:
-
-        if st.button(
-            "🔄 Reset"
-        ):
-
-            st.session_state.email_options = None
-
-            st.session_state.selected_email = None
-
-            st.rerun()
-
-
-# ============================================================
-# PASTE EMAIL TAB
-# ============================================================
-
-with input_tab2:
-
-    pasted_email_content = st.text_area(
-        "Paste email body or HTML table here:",
-        height=180,
-        placeholder=(
-            "Paste the content of the CLdN email here "
-            "if IMAP connection times out..."
-        ),
-    )
-
-
-st.divider()
-
-
-# ============================================================
-# 3. RECONCILIATION
-# ============================================================
-
-if uploaded_file and (
-    selected_email_info
-    or pasted_email_content.strip()
-):
-
-    if st.button(
-        "🚀 Run Reconciliation",
-        type="primary",
-        use_container_width=True,
-    ):
-
-        with st.spinner(
-            "Processing reconciliation..."
-        ):
-
-            # ------------------------------------------------
-            # Get email content
-            # ------------------------------------------------
-
-            attachment_names = []
-
-            if pasted_email_content.strip():
-
-                email_body = (
-                    pasted_email_content
-                )
-
-            else:
-
-                (
-                    email_body,
-                    attachment_names,
-                ) = fetch_email_body_fast(
-                    selected_email_info
-                )
-
-            # ------------------------------------------------
-            # Email diagnostic
-            # ------------------------------------------------
-
-            if not email_body:
-
-                st.error(
-                    "❌ The selected email returned "
-                    "no readable body content."
-                )
-
-            else:
-
-                with st.expander(
-                    "🔎 Email Diagnostic",
-                    expanded=False,
-                ):
-
-                    st.write(
-                        "Extracted email characters:",
-                        len(email_body),
-                    )
-
-                    if attachment_names:
-
-                        st.write(
-                            "Attachments found:"
-                        )
-
-                        for filename in attachment_names:
-
-                            st.write(
-                                f"• {filename}"
-                            )
-
-                    else:
-
-                        st.write(
-                            "Attachments found: None"
-                        )
-
-                    st.write(
-                        "Detected trailer IDs:"
-                    )
-
-                    diagnostic_trailers = sorted(
-                        set(
-                            re.findall(
-                                TRAILER_REGEX,
-                                email_body,
-                                re.IGNORECASE,
-                            )
-                        )
-                    )
-
-                    if diagnostic_trailers:
-
-                        st.write(
-                            ", ".join(
-                                diagnostic_trailers
-                            )
-                        )
-
-                    else:
-
-                        st.warning(
-                            "⚠️ No GTC/GTUK trailer IDs "
-                            "were detected in the extracted "
-                            "email content."
-                        )
-
-                    st.code(
-                        email_body[:5000]
-                    )
-
-                # ------------------------------------------------
-                # Read Qargo file
-                # ------------------------------------------------
-
-                try:
-
-                    if uploaded_file.name.endswith(
-                        (
-                            ".xlsx",
-                            ".xls",
-                        )
-                    ):
-
-                        df = pd.read_excel(
-                            uploaded_file
-                        )
-
-                    else:
-
-                        try:
-
-                            df = pd.read_csv(
-                                uploaded_file
-                            )
-
-                        except Exception:
-
-                            uploaded_file.seek(
-                                0
-                            )
-
-                            df = pd.read_csv(
-                                uploaded_file,
-                                encoding_errors="ignore",
-                            )
-
-                    df.columns = [
-                        str(c).strip()
-                        for c in df.columns
-                    ]
-
-                except Exception as e:
-
+if uploaded_file:
+    if st.button("🚀 Go", type="primary", use_container_width=True):
+        with st.spinner("Reading Qargo export and finding the matching sailing..."):
+            try:
+                qargo_df = read_qargo_file(uploaded_file)
+                if qargo_df.empty:
+                    st.error("The uploaded Qargo file contains no rows.")
+                    st.stop()
+
+                qargo_df.columns = [str(col).strip() for col in qargo_df.columns]
+                columns = identify_qargo_fields(qargo_df)
+                sailing_date, direction_prefix = infer_qargo_sailing(qargo_df, columns)
+                wanted_route = DIRECTION_MAP[direction_prefix]
+
+                st.write(f"**Qargo Intermodal Departure:** {sailing_date.strftime('%A %d %B %Y')}")
+                st.write(f"**Direction inferred from booking refs:** {direction_text(direction_prefix)}")
+
+                emails = fetch_recent_sailing_emails()
+                if not emails:
                     st.error(
-                        f"❌ Error reading uploaded file: {e}"
+                        "No readable emails with subject 'Sailing Confirmation' "
+                        f"were found in Gmail label '{GMAIL_LABEL}'."
                     )
+                    st.stop()
 
-                    df = pd.DataFrame()
+                matches = []
+                parsed_emails = []
+                for item in emails:
+                    details = parse_sailing_details(item)
+                    parsed_emails.append((item, details))
+                    if details["scheduled"] is None or details["route"] is None:
+                        continue
+                    if details["scheduled"].date() != sailing_date:
+                        continue
+                    if details["route"] != wanted_route:
+                        continue
+                    matches.append((item, details))
 
-                # ------------------------------------------------
-                # Reconciliation
-                # ------------------------------------------------
-
-                if (
-                    not df.empty
-                    and email_body
-                ):
-
-                    trailer_col = find_column(
-                        df,
-                        [
-                            "trailers & instructions",
-                            "trailer",
-                        ],
+                if not matches:
+                    st.error(
+                        "No Sailing Confirmation matched both the Qargo departure "
+                        f"date ({sailing_date.strftime('%d/%m/%Y')}) and route "
+                        f"({direction_text(direction_prefix)}). No reconciliation "
+                        "was run. Check the Qargo date, booking-reference prefix, "
+                        "Gmail label and confirmation emails."
                     )
-
-                    instr_col = find_column(
-                        df,
-                        [
-                            "instructions",
-                            "instruction",
-                            "notes",
-                        ],
-                    )
-
-                    gmr_col = find_column(
-                        df,
-                        ["gmr"],
-                    )
-
-                    pbn_col = find_column(
-                        df,
-                        ["pbn"],
-                    )
-
-                    booking_col = find_column(
-                        df,
-                        [
-                            "booking ref",
-                            "booking reference",
-                            "booking",
-                        ],
-                    )
-
-                    # ------------------------------------------------
-                    # Parse CLdN email
-                    # ------------------------------------------------
-
-                    soup = BeautifulSoup(
-                        email_body,
-                        "html.parser",
-                    )
-
-                    cldn_units = set()
-
-                    trailer_row_data = {}
-
-                    rows = soup.find_all(
-                        "tr"
-                    )
-
-                    for tr in rows:
-
-                        cells = tr.find_all(
-                            [
-                                "td",
-                                "th",
-                            ]
-                        )
-
-                        if not cells:
-                            continue
-
-                        raw_cell_texts = [
-                            c.get_text(
-                                separator=" ",
-                                strip=True,
-                            )
-                            for c in cells
-                        ]
-
-                        cleaned_tokens = [
-                            clean_val(c)
-                            for c in raw_cell_texts
-                            if clean_val(c)
-                        ]
-
-                        row_combined = " ".join(
-                            cleaned_tokens
-                        )
-
-                        gt_matches = re.findall(
-                            TRAILER_REGEX,
-                            row_combined,
-                            re.IGNORECASE,
-                        )
-
-                        for m in gt_matches:
-
-                            clean_gt = clean_val(
-                                m
-                            )
-
-                            cldn_units.add(
-                                clean_gt
-                            )
-
-                            if (
-                                clean_gt
-                                not in trailer_row_data
-                            ):
-
-                                trailer_row_data[
-                                    clean_gt
-                                ] = set()
-
-                            trailer_row_data[
-                                clean_gt
-                            ].update(
-                                cleaned_tokens
-                            )
-
-                    # ------------------------------------------------
-                    # Fallback line parsing
-                    # ------------------------------------------------
-
-                    if not cldn_units:
-
-                        for line in email_body.splitlines():
-
-                            c_line = clean_val(
-                                line
-                            )
-
-                            matches = re.findall(
-                                TRAILER_REGEX,
-                                c_line,
-                                re.IGNORECASE,
-                            )
-
-                            for m in matches:
-
-                                clean_gt = clean_val(
-                                    m
-                                )
-
-                                cldn_units.add(
-                                    clean_gt
-                                )
-
-                                if (
-                                    clean_gt
-                                    not in trailer_row_data
-                                ):
-
-                                    trailer_row_data[
-                                        clean_gt
-                                    ] = set()
-
-                                trailer_row_data[
-                                    clean_gt
-                                ].add(
-                                    c_line
-                                )
-
-                    full_email_clean = clean_val(
-                        soup.get_text()
-                    )
-
-                    st.subheader(
-                        "📋 Reconciliation Results"
-                    )
-
-                    results_data = []
-
-                    # ------------------------------------------------
-                    # Process Qargo rows
-                    # ------------------------------------------------
-
-                    for idx, row in df.iterrows():
-
-                        raw_trailer = (
-                            str(
-                                row[trailer_col]
-                            )
-                            if (
-                                trailer_col
-                                and pd.notna(
-                                    row[trailer_col]
-                                )
-                            )
-                            else ""
-                        )
-
-                        trailer_match = re.search(
-                            TRAILER_REGEX,
-                            raw_trailer,
-                            re.IGNORECASE,
-                        )
-
-                        clean_trailer = (
-                            clean_val(
-                                trailer_match.group(0)
-                            )
-                            if trailer_match
-                            else clean_val(
-                                raw_trailer
-                            )
-                        )
-
-                        if not clean_trailer:
-                            continue
-
-                        # --------------------------------------------
-                        # Sailing Status
-                        # --------------------------------------------
-
-                        in_email = (
-                            clean_trailer
-                            in cldn_units
-                        )
-
-                        status = (
-                            "Matched 🟢"
-                            if in_email
-                            else "Not Present (Left Behind) 🔴"
-                        )
-
-                        # --------------------------------------------
-                        # Instructions Check
-                        # --------------------------------------------
-
-                        raw_instr = (
-                            str(
-                                row[instr_col]
-                            ).strip()
-                            if (
-                                instr_col
-                                and pd.notna(
-                                    row[instr_col]
-                                )
-                            )
-                            else ""
-                        )
-
-                        instr_trailer_match = re.search(
-                            TRAILER_REGEX,
-                            raw_instr,
-                            re.IGNORECASE,
-                        )
-
-                        instr_trailer_clean = (
-                            clean_val(
-                                instr_trailer_match.group(0)
-                            )
-                            if instr_trailer_match
-                            else ""
-                        )
-
-                        if (
-                            instr_trailer_clean
-                            and instr_trailer_clean
-                            != clean_trailer
-                        ):
-
-                            instr_status = (
-                                f"⚠️ Mismatch: "
-                                f"{instr_trailer_clean} "
-                                f"(Expected {clean_trailer})"
-                            )
-
-                        else:
-
-                            instr_status = (
-                                "Clean 🟢"
-                            )
-
-                        # --------------------------------------------
-                        # Reference Validator
-                        # --------------------------------------------
-
-                        row_tokens = (
-                            trailer_row_data.get(
-                                clean_trailer,
-                                set(),
-                            )
-                        )
-
-                        def verify_ref(
-                            ref_val
-                        ):
-
-                            c_ref = clean_val(
-                                ref_val
-                            )
-
-                            if not c_ref:
-                                return "-"
-
-                            if any(
-                                c_ref in tok
-                                or tok in c_ref
-                                for tok in row_tokens
-                            ):
-
-                                return (
-                                    f"{ref_val} "
-                                    f"🟢 Matched"
-                                )
-
-                            elif (
-                                c_ref
-                                in full_email_clean
-                            ):
-
-                                return (
-                                    f"{ref_val} "
-                                    f"⚠️ Mismatch"
-                                )
-
-                            else:
-
-                                return (
-                                    f"{ref_val} "
-                                    f"🔴 Missing"
-                                )
-
-                        raw_gmr = (
-                            str(
-                                row[gmr_col]
-                            )
-                            if (
-                                gmr_col
-                                and pd.notna(
-                                    row[gmr_col]
-                                )
-                            )
-                            else ""
-                        )
-
-                        raw_pbn = (
-                            str(
-                                row[pbn_col]
-                            )
-                            if (
-                                pbn_col
-                                and pd.notna(
-                                    row[pbn_col]
-                                )
-                            )
-                            else ""
-                        )
-
-                        raw_booking = (
-                            str(
-                                row[booking_col]
-                            )
-                            if (
-                                booking_col
-                                and pd.notna(
-                                    row[booking_col]
-                                )
-                            )
-                            else ""
-                        )
-
-                        results_data.append(
-                            {
-                                "Trailer ID": clean_trailer,
-                                "Sailing Status": status,
-                                "Instructions Check": instr_status,
-                                "GMR Ref": verify_ref(
-                                    raw_gmr
+                    with st.expander("Show recent confirmations checked"):
+                        rows = []
+                        for item, details in parsed_emails:
+                            scheduled = details["scheduled"]
+                            rows.append({
+                                "Subject": item["subject"],
+                                "Email date": item["date_header"],
+                                "Route": (
+                                    f"{details['route'][0].title()} → {details['route'][1].title()}"
+                                    if details["route"] else "Route not detected"
                                 ),
-                                "PBN Ref": verify_ref(
-                                    raw_pbn
-                                ),
-                                "Booking Ref": verify_ref(
-                                    raw_booking
-                                ),
-                            }
-                        )
+                                "Scheduled sailing": scheduled.strftime("%d/%m/%Y %H:%M") if scheduled else "Date/time not detected",
+                            })
+                        if rows:
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    st.stop()
 
-                    # ------------------------------------------------
-                    # Forward Shipped Units
-                    # ------------------------------------------------
-
-                    qargo_found_units = set(
-                        r["Trailer ID"]
-                        for r in results_data
+                if len(matches) > 1:
+                    st.error(
+                        f"{len(matches)} Sailing Confirmations matched the same date and "
+                        "route. To avoid choosing the wrong sailing, no reconciliation "
+                        "was run."
                     )
-
-                    forward_shipped = (
-                        cldn_units
-                        - qargo_found_units
-                    )
-
-                    for f_unit in sorted(
-                        list(forward_shipped)
-                    ):
-
-                        results_data.append(
-                            {
-                                "Trailer ID": f_unit,
-                                "Sailing Status": (
-                                    "Forward Shipped 🔵"
-                                ),
-                                "Instructions Check": "-",
-                                "GMR Ref": "-",
-                                "PBN Ref": "-",
-                                "Booking Ref": "-",
-                            }
-                        )
-
-                    # ------------------------------------------------
-                    # Render Table
-                    # ------------------------------------------------
-
-                    results_df = pd.DataFrame(
-                        results_data
-                    )
-
                     st.dataframe(
-                        results_df,
+                        pd.DataFrame([
+                            {
+                                "Subject": item["subject"],
+                                "Scheduled sailing": details["scheduled"].strftime("%A %d %B %Y at %H:%M"),
+                                "Vessel": details["vessel"],
+                                "Email date": item["date_header"],
+                            }
+                            for item, details in matches
+                        ]),
                         use_container_width=True,
                         hide_index=True,
                     )
+                    st.stop()
 
-                    # ------------------------------------------------
-                    # Summary Metrics
-                    # ------------------------------------------------
+                selected_email, details = matches[0]
+                st.success("Matching sailing identified.")
+                st.markdown("### 🚢 Selected Sailing Confirmation")
+                st.write(f"**Subject:** {selected_email['subject']}")
+                st.write(f"**Route:** {direction_text(direction_prefix)}")
+                st.write(f"**Scheduled sailing:** {details['scheduled'].strftime('%A %d %B %Y at %H:%M')}")
+                if details["vessel"]:
+                    st.write(f"**Vessel:** {details['vessel']}")
+                st.caption(
+                    "The scheduled date/time in the confirmation was used for matching. "
+                    "The separate 'Departed' time is intentionally ignored."
+                )
 
-                    st.divider()
-
-                    st.subheader(
-                        "📊 Summary Metrics"
+                results_df, cldn_count = reconcile(
+                    qargo_df, selected_email["body"], columns
+                )
+                if results_df.empty:
+                    st.error(
+                        "The matching email was found, but no trailer IDs could be "
+                        "read from the Qargo file. Please check the trailer column."
                     )
+                    st.stop()
+                render_results(results_df, cldn_count)
 
-                    matched_cnt = sum(
-                        1
-                        for r in results_data
-                        if "Matched"
-                        in r["Sailing Status"]
-                    )
+                st.download_button(
+                    "⬇️ Download Reconciliation Results (CSV)",
+                    data=results_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"CLDN_Reconciliation_{sailing_date:%Y%m%d}_{direction_prefix}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
-                    left_cnt = sum(
-                        1
-                        for r in results_data
-                        if "Left Behind"
-                        in r["Sailing Status"]
-                    )
-
-                    forward_cnt = sum(
-                        1
-                        for r in results_data
-                        if "Forward Shipped"
-                        in r["Sailing Status"]
-                    )
-
-                    flagged_cnt = sum(
-                        1
-                        for r in results_data
-                        if (
-                            "⚠️"
-                            in r[
-                                "Instructions Check"
-                            ]
-                            or "⚠️"
-                            in r["PBN Ref"]
-                            or "⚠️"
-                            in r["GMR Ref"]
-                            or "⚠️"
-                            in r["Booking Ref"]
-                        )
-                    )
-
-                    total_shipped = (
-                        matched_cnt
-                        + forward_cnt
-                    )
-
-                    st.metric(
-                        "🚢 Total Trailers Shipped",
-                        total_shipped,
-                    )
-
-                    st.write("")
-
-                    c1, c2, c3, c4 = st.columns(
-                        4
-                    )
-
-                    c1.metric(
-                        "Matched Trailers",
-                        matched_cnt,
-                    )
-
-                    c2.metric(
-                        "Forward Shipped",
-                        forward_cnt,
-                    )
-
-                    c3.metric(
-                        "Left Behind",
-                        left_cnt,
-                    )
-
-                    c4.metric(
-                        "Flagged / Swapped",
-                        flagged_cnt,
-                    )
+            except Exception as exc:
+                st.error(f"Reconciliation stopped: {type(exc).__name__}: {exc}")
+                st.info(
+                    "No sailing was guessed. Check the Qargo column headings, "
+                    "Gmail credentials/secrets, and the matching Sailing Confirmation."
+                )
+else:
+    st.info("Upload a Qargo export to begin. The app will identify the sailing automatically.")
