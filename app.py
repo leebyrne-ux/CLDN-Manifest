@@ -96,8 +96,12 @@ def find_column(df, search_terms):
     return None
 
 
-def as_date(value):
-    """Convert common Excel/Qargo date values to a date, or None."""
+def as_datetime_local(value):
+    """Parse a Qargo Intermodal Departure into Europe/Dublin date and time.
+
+    ISO values with an explicit offset (e.g. 2026-10-14T12:00:00+01:00)
+    are converted to Europe/Dublin. Naive values are treated as local Irish time.
+    """
     if value is None:
         return None
     try:
@@ -105,33 +109,34 @@ def as_date(value):
             return None
     except (TypeError, ValueError):
         pass
+
     if isinstance(value, pd.Timestamp):
-        return value.date()
+        value = value.to_pydatetime()
     if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "nat", "none"}:
+            return None
+        try:
+            parsed = pd.to_datetime(text, dayfirst=False, errors="coerce")
+            if pd.isna(parsed):
+                # Qargo exports may also use a day-first display format.
+                parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            if isinstance(parsed, pd.Timestamp):
+                parsed = parsed.to_pydatetime()
+        except (TypeError, ValueError, OverflowError):
+            return None
 
-    text = str(value).strip()
-    if not text or text.lower() in {"nan", "nat", "none"}:
-        return None
-
-    # First let pandas handle normal exported date/time formats.
-    try:
-        parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
-        if not pd.isna(parsed):
-            return parsed.date()
-    except (TypeError, ValueError, OverflowError):
-        pass
-
-    # Excel serial dates occasionally arrive as strings.
-    try:
-        number = float(text)
-        if 20000 < number < 80000:
-            return (pd.Timestamp("1899-12-30") + pd.to_timedelta(number, unit="D")).date()
-    except (ValueError, TypeError, OverflowError):
-        pass
-    return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=DUBLIN_TZ)
+    else:
+        parsed = parsed.astimezone(DUBLIN_TZ)
+    return parsed.replace(second=0, microsecond=0)
 
 
 def direction_from_booking_refs(values):
@@ -238,25 +243,40 @@ def body_to_text(body):
     return re.sub(r"[ \t]+", " ", soup.get_text("\n", strip=True)).replace("\xa0", " ")
 
 
-def fetch_recent_sailing_emails(limit=150):
-    """Fetch recent Sailing Confirmation messages from the configured label."""
+def fetch_sailing_emails_for_date(sailing_datetime):
+    """Search Gmail for confirmations mentioning the Qargo sailing date.
+
+    Gmail IMAP cannot search on a sailing date as a structured field because
+    that date lives inside the email body, not the email's received-date header.
+    Search the subject and the exact CLdN body date first, then download full
+    messages only for those candidates. If this targeted search returns none,
+    do not broaden into downloading hundreds of unrelated emails.
+    """
     if not GMAIL_APP_PASS:
         raise RuntimeError(
             "GMAIL_APP_PASS is missing from Streamlit secrets. "
             "Add your Gmail app password in the app's Secrets settings."
         )
+
+    date_text = sailing_datetime.strftime("%d/%m/%Y")
     mail = None
     results = []
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
         folder = open_gmail_folder(mail)
-        status, data = mail.uid("search", None, 'SUBJECT "Sailing Confirmation"')
+
+        # CLdN confirmations show the scheduled sailing as e.g. 14/10/2026.
+        # The body search narrows results before any full email is downloaded.
+        status, data = mail.uid(
+            "search", None,
+            'SUBJECT "Sailing Confirmation" BODY "' + date_text + '"'
+        )
         if status != "OK":
-            raise RuntimeError("Gmail search for Sailing Confirmation failed.")
+            raise RuntimeError("Gmail search for date-specific Sailing Confirmations failed.")
 
         ids = data[0].split() if data and data[0] else []
-        for message_id in reversed(ids[-limit:]):
+        for message_id in reversed(ids):
             status, data = mail.uid("fetch", message_id, "(RFC822)")
             if status != "OK" or not data:
                 continue
@@ -399,24 +419,26 @@ def identify_qargo_fields(df):
 
 
 def infer_qargo_sailing(df, columns):
-    departure_dates = set()
+    departure_datetimes = set()
     bad_departures = []
     for value in df[columns["departure"]].tolist():
         if str(value).strip() and str(value).strip().lower() not in {"nan", "nat", "none"}:
-            parsed = as_date(value)
+            parsed = as_datetime_local(value)
             if parsed:
-                departure_dates.add(parsed)
+                departure_datetimes.add(parsed)
             else:
                 bad_departures.append(str(value))
 
-    if not departure_dates:
+    if not departure_datetimes:
         raise ValueError(
-            "No usable dates were found in the Qargo 'Intermodal Departure' column."
+            "No usable date/time values were found in the Qargo 'Intermodal Departure' column."
         )
-    if len(departure_dates) > 1:
-        shown = ", ".join(d.strftime("%d/%m/%Y") for d in sorted(departure_dates))
+    if len(departure_datetimes) > 1:
+        shown = ", ".join(
+            dt.strftime("%d/%m/%Y %H:%M") for dt in sorted(departure_datetimes)
+        )
         raise ValueError(
-            "The Qargo export contains more than one Intermodal Departure date "
+            "The Qargo export contains more than one Intermodal Departure date/time "
             f"({shown}). Please upload an export for one sailing only; the app "
             "will not guess which sailing you intend to reconcile."
         )
@@ -434,7 +456,7 @@ def infer_qargo_sailing(df, columns):
             "LIV-prefixed references for Liverpool → Dublin."
         )
 
-    return next(iter(departure_dates)), prefix
+    return next(iter(departure_datetimes)), prefix
 
 
 # ============================================================
@@ -581,13 +603,13 @@ if uploaded_file:
 
                 qargo_df.columns = [str(col).strip() for col in qargo_df.columns]
                 columns = identify_qargo_fields(qargo_df)
-                sailing_date, direction_prefix = infer_qargo_sailing(qargo_df, columns)
+                sailing_datetime, direction_prefix = infer_qargo_sailing(qargo_df, columns)
                 wanted_route = DIRECTION_MAP[direction_prefix]
 
-                st.write(f"**Qargo Intermodal Departure:** {sailing_date.strftime('%A %d %B %Y')}")
+                st.write(f"**Qargo Intermodal Departure:** {sailing_datetime.strftime('%A %d %B %Y at %H:%M %Z')}")
                 st.write(f"**Direction inferred from booking refs:** {direction_text(direction_prefix)}")
 
-                emails = fetch_recent_sailing_emails()
+                emails = fetch_sailing_emails_for_date(sailing_datetime)
                 if not emails:
                     st.error(
                         "No readable emails with subject 'Sailing Confirmation' "
@@ -602,7 +624,7 @@ if uploaded_file:
                     parsed_emails.append((item, details))
                     if details["scheduled"] is None or details["route"] is None:
                         continue
-                    if details["scheduled"].date() != sailing_date:
+                    if details["scheduled"].astimezone(DUBLIN_TZ) != sailing_datetime:
                         continue
                     if details["route"] != wanted_route:
                         continue
@@ -610,8 +632,8 @@ if uploaded_file:
 
                 if not matches:
                     st.error(
-                        "No Sailing Confirmation matched both the Qargo departure "
-                        f"date ({sailing_date.strftime('%d/%m/%Y')}) and route "
+                        "No Sailing Confirmation matched the exact Qargo departure "
+                        f"scheduled date/time ({sailing_datetime.strftime('%d/%m/%Y %H:%M')}) and route "
                         f"({direction_text(direction_prefix)}). No reconciliation "
                         "was run. Check the Qargo date, booking-reference prefix, "
                         "Gmail label and confirmation emails."
@@ -635,7 +657,7 @@ if uploaded_file:
 
                 if len(matches) > 1:
                     st.error(
-                        f"{len(matches)} Sailing Confirmations matched the same date and "
+                        f"{len(matches)} Sailing Confirmations matched the exact scheduled date/time and "
                         "route. To avoid choosing the wrong sailing, no reconciliation "
                         "was run."
                     )
@@ -681,7 +703,7 @@ if uploaded_file:
                 st.download_button(
                     "⬇️ Download Reconciliation Results (CSV)",
                     data=results_df.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"CLDN_Reconciliation_{sailing_date:%Y%m%d}_{direction_prefix}.csv",
+                    file_name=f"CLDN_Reconciliation_{sailing_datetime:%Y%m%d_%H%M}_{direction_prefix}.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
