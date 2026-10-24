@@ -277,12 +277,42 @@ def fetch_sailing_emails_for_date(sailing_datetime):
 
         ids = data[0].split() if data and data[0] else []
         for message_id in reversed(ids):
-            status, data = mail.uid("fetch", message_id, "(RFC822)")
-            if status != "OK" or not data:
+            # Read only lightweight headers first. Ignore booking-notification
+            # copies before downloading their full message bodies.
+            status, header_data = mail.uid(
+                "fetch",
+                message_id,
+                "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])",
+            )
+            if status != "OK" or not header_data:
+                continue
+            raw_header = next(
+                (
+                    item[1] for item in header_data
+                    if isinstance(item, tuple)
+                    and len(item) > 1
+                    and isinstance(item[1], bytes)
+                ),
+                None,
+            )
+            if not raw_header:
+                continue
+            header_msg = email.message_from_bytes(raw_header)
+            subject = decode_header_value(header_msg.get("Subject", ""))
+            subject_lower = subject.lower()
+            if "sailing confirmation" not in subject_lower:
+                continue
+            # The [Bookings] copy is a separate notification and must not be
+            # considered as the official Sailing Confirmation.
+            if "[bookings]" in subject_lower:
+                continue
+
+            status, full_data = mail.uid("fetch", message_id, "(RFC822)")
+            if status != "OK" or not full_data:
                 continue
             raw_message = next(
                 (
-                    item[1] for item in data
+                    item[1] for item in full_data
                     if isinstance(item, tuple)
                     and len(item) > 1
                     and isinstance(item[1], bytes)
@@ -292,9 +322,8 @@ def fetch_sailing_emails_for_date(sailing_datetime):
             if not raw_message:
                 continue
             msg = email.message_from_bytes(raw_message)
+            # Use the full message's decoded subject in the result.
             subject = decode_header_value(msg.get("Subject", ""))
-            if "sailing confirmation" not in subject.lower():
-                continue
             body, attachments = extract_email_content(msg)
             text = body_to_text(body)
             results.append(
