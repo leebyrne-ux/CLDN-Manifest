@@ -313,9 +313,11 @@ def fetch_sailing_emails_for_date(sailing_datetime):
             else:
                 standard_candidates.append(candidate)
 
-        # Use standard confirmations in preference to [Bookings] copies.
-        # Only fall back to [Bookings] if no standard confirmation was found.
-        chosen_candidates = standard_candidates or bookings_candidates
+        # Check both standard and [Bookings] confirmations. A standard email
+        # for a different sailing on the same date must not hide the correct
+        # [Bookings] confirmation. Preference is applied only after exact
+        # scheduled date/time and route matching in the main app.
+        chosen_candidates = standard_candidates + bookings_candidates
 
         for message_id, header_subject, is_bookings in chosen_candidates:
             status, full_data = mail.uid("fetch", message_id, "(RFC822)")
@@ -346,6 +348,7 @@ def fetch_sailing_emails_for_date(sailing_datetime):
                     "body": body,
                     "text": text,
                     "attachments": attachments,
+                    "is_bookings": "[bookings]" in subject.lower(),
                 }
             )
         return results
@@ -669,6 +672,16 @@ if uploaded_file:
                     if details["route"] != wanted_route:
                         continue
                     matches.append((item, details))
+
+                # If both email types confirm this exact sailing, use the
+                # standard confirmation in preference to its [Bookings] copy.
+                # Do not let an unrelated standard confirmation suppress a
+                # matching [Bookings] email.
+                standard_matches = [
+                    pair for pair in matches if not pair[0].get("is_bookings", False)
+                ]
+                if standard_matches:
+                    matches = standard_matches
 
                 if not matches:
                     st.error(
