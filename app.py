@@ -261,6 +261,8 @@ def fetch_sailing_emails_for_date(sailing_datetime):
     date_text = sailing_datetime.strftime("%d/%m/%Y")
     mail = None
     results = []
+    standard_candidates = []
+    bookings_candidates = []
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
         mail.login(GMAIL_USER, GMAIL_APP_PASS)
@@ -302,11 +304,20 @@ def fetch_sailing_emails_for_date(sailing_datetime):
             subject_lower = subject.lower()
             if "sailing confirmation" not in subject_lower:
                 continue
-            # The [Bookings] copy is a separate notification and must not be
-            # considered as the official Sailing Confirmation.
-            if "[bookings]" in subject_lower:
-                continue
+            # Prefer the standard confirmation when it exists. Some sailings
+            # arrive only as a [Bookings] message, so retain those as a fallback
+            # rather than discarding them outright.
+            candidate = (message_id, subject, "[bookings]" in subject_lower)
+            if candidate[2]:
+                bookings_candidates.append(candidate)
+            else:
+                standard_candidates.append(candidate)
 
+        # Use standard confirmations in preference to [Bookings] copies.
+        # Only fall back to [Bookings] if no standard confirmation was found.
+        chosen_candidates = standard_candidates or bookings_candidates
+
+        for message_id, header_subject, is_bookings in chosen_candidates:
             status, full_data = mail.uid("fetch", message_id, "(RFC822)")
             if status != "OK" or not full_data:
                 continue
